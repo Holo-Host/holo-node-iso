@@ -44,7 +44,15 @@ jobs:
           # coreos-installer
           COREOS_URL=$(curl -sf \
             https://api.github.com/repos/coreos/coreos-installer/releases/latest \
-            | jq -r '.assets[] | select(.name == "coreos-installer_x86_64") | .browser_download_url')
+            | jq -r '.assets[] | select(.name == "coreos-installer_x86_64") | .browser_download_url' \
+            | tr -d '[:space:]')
+          
+          if [ -z "$COREOS_URL" ]; then
+            echo "ERROR: Could not resolve coreos-installer download URL"
+            exit 1
+          fi
+          
+          echo "Downloading coreos-installer from: $COREOS_URL"
           curl -L "$COREOS_URL" -o /usr/local/bin/coreos-installer
           chmod +x /usr/local/bin/coreos-installer
 
