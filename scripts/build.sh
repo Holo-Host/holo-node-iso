@@ -32,7 +32,7 @@ curl -L "$DOWNLOAD_URL" -o "${CONFIG_DIR}/node-onboarding"
 chmod +x "${CONFIG_DIR}/node-onboarding"
 
 echo "==> Compiling Butane config"
-butane --strict "${CONFIG_DIR}/node.bu" > ignition.json
+butane --strict -d "${CONFIG_DIR}/node.bu" > ignition.json
 
 echo "==> Downloading FCOS ${FCOS_STREAM} base image (${ARCH})"
 coreos-installer download \
