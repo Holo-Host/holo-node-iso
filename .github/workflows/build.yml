@@ -43,6 +43,7 @@ jobs:
 
           # coreos-installer
           COREOS_URL=$(curl -sf \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             https://api.github.com/repos/coreos/coreos-installer/releases/latest \
             | jq -r '.assets[] | select(.name == "coreos-installer_x86_64") | .browser_download_url' \
             | tr -d '[:space:]')
