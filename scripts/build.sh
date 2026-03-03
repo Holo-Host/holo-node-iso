@@ -12,7 +12,11 @@ echo "==> Fetching latest node-onboarding binary for ${ARCH}"
 RELEASE_JSON=$(curl -sf \
   -H "Accept: application/vnd.github+json" \
   -H "User-Agent: holo-node-iso-build" \
-  "https://api.github.com/repos/${ONBOARDING_REPO}/releases/latest")
+  "https://api.github.com/repos/${ONBOARDING_REPO}/releases/latest") || {
+  echo "ERROR: Failed to fetch release info from GitHub API."
+  echo "Check that holo-host/node-onboarding has at least one published release with binary assets."
+  exit 1
+}
 
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | \
   jq -r ".assets[] | select(.name == \"${ASSET_NAME}\") | .browser_download_url")
