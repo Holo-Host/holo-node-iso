@@ -5,7 +5,7 @@ on:
     branches: [main]
   release:
     types: [published]
-  workflow_dispatch:       # lets you trigger a build manually from the GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,6 +16,14 @@ jobs:
         arch: [x86_64, aarch64]
 
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -31,10 +39,14 @@ jobs:
           chmod +x /usr/local/bin/butane
 
           # coreos-installer
-          curl -L \
-            https://github.com/coreos/coreos-installer/releases/latest/download/coreos-installer_x86_64 \
-            -o /usr/local/bin/coreos-installer
+          COREOS_URL=$(curl -sf \
+            https://api.github.com/repos/coreos/coreos-installer/releases/latest \
+            | jq -r '.assets[] | select(.name == "coreos-installer_x86_64") | .browser_download_url')
+          curl -L "$COREOS_URL" -o /usr/local/bin/coreos-installer
           chmod +x /usr/local/bin/coreos-installer
+
+          butane --version
+          coreos-installer --version
 
       - name: Build ISO (${{ matrix.arch }})
         env:
