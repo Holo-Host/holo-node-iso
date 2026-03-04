@@ -347,6 +347,9 @@ storage:
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
+            mkdir -p /run/issue.d
+            printf '\n\033[1;32m[Holo Node]\033[0m node-setup: OK — node-onboarding installed\n\n' \
+            > /run/issue.d/50-node-setup.issue
             exit 0
           fi
 
@@ -354,6 +357,9 @@ storage:
           WIFI_IFACE=$(detect_wifi_iface)
           if [ -z "$WIFI_IFACE" ]; then
             log "ERROR: No internet and no WiFi interface found. Cannot proceed."
+            mkdir -p /run/issue.d
+            printf '\n\033[1;31m[Holo Node]\033[0m node-setup FAILED — check: journalctl -u node-setup.service\n\n' \
+            > /run/issue.d/50-node-setup.issue
             exit 1
           fi
 
@@ -363,6 +369,9 @@ storage:
             ssid "$AP_SSID" \
             password "$AP_PASSWORD" || {
             log "ERROR: Failed to start WiFi hotspot"
+            mkdir -p /run/issue.d
+            printf '\n\033[1;31m[Holo Node]\033[0m node-setup FAILED — check: journalctl -u node-setup.service\n\n' \
+            > /run/issue.d/50-node-setup.issue
             exit 1
           }
           sleep 3
@@ -372,6 +381,9 @@ storage:
 
           log "WiFi configured — downloading node-onboarding"
           download_binary
+          mkdir -p /run/issue.d
+          printf '\n\033[1;32m[Holo Node]\033[0m node-setup: OK — node-onboarding installed\n\n' \
+          > /run/issue.d/50-node-setup.issue
           exit 0
 
 # ── systemd units ─────────────────────────────────────────────────────────────
@@ -387,6 +399,7 @@ systemd:
         Wants=NetworkManager.service
         ConditionPathExists=!/usr/local/bin/node-onboarding
         Before=node-onboarding.service
+        OnFailure=node-setup-report.service
 
         [Service]
         Type=oneshot
@@ -441,6 +454,23 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
+
+    # ── node-update-report.service ───────────────────────────────────────────────
+    - name: node-update-report.service
+      contents: |
+        [Unit]
+        Description=Report node-setup failure to console
+        DefaultDependencies=no
+
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/bash -c '\
+        mkdir -p /run/issue.d && \
+        printf "\n\033[1;31m[Holo Node] node-setup.service FAILED\033[0m\n" \
+        > /run/issue.d/50-node-setup.issue && \
+        journalctl -u node-setup.service -n 30 --no-pager \
+        >> /run/issue.d/50-node-setup.issue && \
+        printf "\n" >> /run/issue.d/50-node-setup.issue'
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
     - name: podman-auto-update.timer
