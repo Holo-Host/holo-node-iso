@@ -51,16 +51,16 @@ storage:
           LoginGraceTime 30
 
     # ── node-setup.sh ──────────────────────────────────────────────────────────
-    # First-boot script: gets node-onboarding onto disk.
-    # Inlined as a shell script so there is no binary to embed — no initramfs
-    # size issue. FCOS ships bash, curl, nmcli, and nc natively.
+    # First-boot script. Inlined as bash — no binary, no initramfs size issue.
+    # FCOS ships bash, curl, nmcli, and nc natively.
     #
-    # Flow:
-    #   1. Wait for NetworkManager to be ready.
-    #   2. If internet reachable → download node-onboarding and exit.
-    #   3. If no internet → start a WiFi AP (HoloNode-Setup / holonode),
-    #      serve a minimal HTML form via nc, collect SSID+password,
-    #      connect via nmcli, then download node-onboarding and exit.
+    # Ethernet path: detects internet → downloads node-onboarding → exits.
+    # WiFi path: starts AP (HoloNode-Setup / holonode) → serves a proper
+    #   HTTP server loop via nc → collects SSID+password → connects →
+    #   downloads node-onboarding → exits.
+    #
+    # The HTTP server loop handles GET /, GET /favicon.ico, and POST /connect
+    # correctly, so normal browser behaviour (favicon fetches, retries) works.
     #
     # Runs once. ConditionPathExists=!/usr/local/bin/node-onboarding in the
     # service unit prevents it ever running again.
@@ -75,13 +75,12 @@ storage:
           ONBOARDING_BIN="/usr/local/bin/node-onboarding"
           AP_SSID="HoloNode-Setup"
           AP_PASSWORD="holonode"
-          AP_IP="192.168.4.1"
           LISTEN_PORT="8080"
           LOG="[node-setup]"
 
-          # ── helpers ────────────────────────────────────────────────────────
+          # ── helpers ──────────────────────────────────────────────────────────
 
-          log() { echo "$LOG $*" | tee /dev/kmsg 2>/dev/null || true; }
+          log() { echo "$LOG $*"; }
 
           has_internet() {
             curl -fsS --max-time 5 --connect-timeout 5 \
@@ -89,8 +88,8 @@ storage:
           }
 
           detect_wifi_iface() {
-            for iface in /sys/class/net/*/wireless; do
-              [ -d "$iface" ] && basename "$(dirname "$iface")" && return
+            for path in /sys/class/net/*/wireless; do
+              [ -d "$path" ] && basename "$(dirname "$path")" && return
             done
             echo ""
           }
@@ -98,6 +97,19 @@ storage:
           url_decode() {
             local encoded="${1//+/ }"
             printf '%b' "${encoded//%/\\x}"
+          }
+
+          parse_field() {
+            local field="$1" body="$2" val
+            val=$(echo "$body" | grep -o "${field}=[^&]*" | cut -d= -f2-)
+            url_decode "$val"
+          }
+
+          send_response() {
+            # send_response <fd> <status> <content-type> <body>
+            local fd="$1" status="$2" ct="$3" body="$4"
+            printf "HTTP/1.1 %s\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+              "$status" "$ct" "${#body}" "$body" >&"$fd"
           }
 
           download_binary() {
@@ -130,109 +142,208 @@ storage:
             log "node-onboarding installed successfully"
           }
 
-          serve_one_request() {
-            # Serve a single HTTP request via nc, return the POST body if it
-            # was a form submission, or empty string for GET requests.
-            local response_html="$1"
-            local body=""
+          # ── HTML pages ────────────────────────────────────────────────────────
 
-            local raw
-            raw=$(echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${#response_html}\r\nConnection: close\r\n\r\n${response_html}" \
-              | nc -l -p "$LISTEN_PORT" -q 1 2>/dev/null || true)
+          read -r -d '' FORM_HTML << 'HTMLEOF' || true
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Holo Node Setup</title>
+            <style>
+              *{box-sizing:border-box;margin:0;padding:0}
+              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+                display:flex;align-items:center;justify-content:center;padding:20px}
+              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+                padding:40px;width:100%;max-width:420px}
+              h1{font-size:22px;font-weight:600;color:#a78bfa;
+                text-align:center;margin-bottom:8px}
+              .sub{text-align:center;color:#666680;font-size:13px;margin-bottom:28px}
+              .info{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
+                padding:14px 16px;font-size:13px;color:#9999bb;
+                margin-bottom:28px;line-height:1.5}
+              label{display:block;font-size:13px;font-weight:500;color:#9999bb;
+                margin-bottom:6px;margin-top:20px}
+              label:first-of-type{margin-top:0}
+              input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;
+                border-radius:8px;padding:10px 14px;color:#e8e8f0;
+                font-size:15px;outline:none}
+              button{width:100%;background:#7c3aed;color:white;border:none;
+                border-radius:8px;padding:12px;font-size:15px;
+                font-weight:600;cursor:pointer;margin-top:28px}
+            </style>
+          </head>
+          <body><div class="card">
+            <h1>Holo Node Setup</h1>
+            <p class="sub">WiFi Configuration</p>
+            <div class="info">Your node is in setup mode. You are connected to
+            <strong>HoloNode-Setup</strong>. Enter your home WiFi credentials
+            to connect your node to the internet.</div>
+            <form method="POST" action="/connect">
+              <label for="ssid">WiFi Network Name (SSID)</label>
+              <input type="text" id="ssid" name="ssid"
+                placeholder="Your WiFi network" autocomplete="off" required>
+              <label for="password">WiFi Password</label>
+              <input type="password" id="password" name="password"
+                placeholder="Your WiFi password" autocomplete="off">
+              <button type="submit">Connect &amp; Continue</button>
+            </form>
+          </div></body></html>
+          HTMLEOF
 
-            # Extract POST body (after the blank line)
-            if echo "$raw" | grep -q "^POST"; then
-              body=$(echo "$raw" | awk '/^\r?$/{found=1; next} found{print}' | tr -d '\r')
-            fi
-            echo "$body"
+          read -r -d '' CONNECTING_HTML << 'HTMLEOF' || true
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Holo Node — Connecting</title>
+            <style>
+              *{box-sizing:border-box;margin:0;padding:0}
+              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+                display:flex;align-items:center;justify-content:center;padding:20px}
+              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+                padding:40px;width:100%;max-width:420px;text-align:center}
+              h1{font-size:20px;color:#a78bfa;margin-bottom:12px}
+              p{color:#666680;font-size:14px;line-height:1.6}
+              .spinner{width:40px;height:40px;border:3px solid #2a2a3a;
+                border-top-color:#7c3aed;border-radius:50%;
+                animation:spin .8s linear infinite;margin:28px auto}
+              @keyframes spin{to{transform:rotate(360deg)}}
+              .note{margin-top:24px;background:#1a1a2e;border:1px solid #2a2a4a;
+                border-radius:10px;padding:14px 16px;font-size:13px;
+                color:#9999bb;line-height:1.5;text-align:left}
+            </style>
+          </head>
+          <body><div class="card">
+            <h1>Connecting...</h1>
+            <div class="spinner"></div>
+            <p>Connecting your node to your WiFi network.<br>
+            This may take up to 30 seconds.</p>
+            <div class="note">Your device will disconnect from HoloNode-Setup.
+            Once the node is online, find its IP on your router and open
+            <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.
+            </div>
+          </div></body></html>
+          HTMLEOF
+
+          # ── HTTP server loop ──────────────────────────────────────────────────
+          # Handles one connection per nc invocation, loops for the next.
+          # Returns the POST body via stdout if a form was submitted,
+          # otherwise returns empty string.
+
+          serve_http_loop() {
+            local wifi_iface="$1"
+
+            while true; do
+              # Each iteration handles exactly one HTTP connection
+              local raw_request=""
+              local post_body=""
+
+              # Use a temp FIFO so we can both read the request and write the response
+              local fifo
+              fifo=$(mktemp -u)
+              mkfifo "$fifo"
+
+              # Read request, write response, capture any POST body
+              post_body=$(
+                {
+                  local request_line=""
+                  local content_length=0
+                  local method="" path=""
+
+                  # Read request line
+                  IFS= read -r request_line
+                  request_line="${request_line%$'\r'}"
+                  method=$(echo "$request_line" | awk '{print $1}')
+                  path=$(echo "$request_line"   | awk '{print $2}')
+
+                  # Read headers
+                  while IFS= read -r hdr; do
+                    hdr="${hdr%$'\r'}"
+                    [ -z "$hdr" ] && break
+                    if [[ "${hdr,,}" == content-length:* ]]; then
+                      content_length="${hdr##*[: ]}"
+                      content_length="${content_length// /}"
+                    fi
+                  done
+
+                  # Read POST body if present
+                  local body=""
+                  if [ "$method" = "POST" ] && [ "${content_length:-0}" -gt 0 ]; then
+                    IFS= read -r -d '' -n "$content_length" body 2>/dev/null || true
+                  fi
+
+                  # Route the request
+                  case "$path" in
+                    /favicon.ico)
+                      printf "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                      ;;
+                    /connect)
+                      # Send connecting page immediately before we drop the AP
+                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+                        "${#CONNECTING_HTML}" "$CONNECTING_HTML"
+                      # Signal the outer loop with the form body
+                      echo "POSTBODY:${body}"
+                      ;;
+                    *)
+                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+                        "${#FORM_HTML}" "$FORM_HTML"
+                      ;;
+                  esac
+                } | nc -l -p "$LISTEN_PORT" -q 2 2>/dev/null | grep "^POSTBODY:" | head -1 || true
+              )
+
+              rm -f "$fifo"
+
+              # If we got a form submission, attempt WiFi connection
+              if [ -n "$post_body" ]; then
+                local body="${post_body#POSTBODY:}"
+                local ssid password
+                ssid=$(parse_field "ssid" "$body")
+                password=$(parse_field "password" "$body")
+
+                [ -z "$ssid" ] && continue
+
+                log "Attempting to connect to '${ssid}'"
+
+                # Drop AP and connect
+                nmcli device disconnect "$wifi_iface" 2>/dev/null || true
+                sleep 2
+                nmcli device wifi connect "$ssid" \
+                  password "$password" \
+                  ifname "$wifi_iface" 2>/dev/null || true
+                sleep 8
+
+                if has_internet; then
+                  log "Connected to '${ssid}' — internet confirmed"
+                  return 0
+                fi
+
+                log "Connection to '${ssid}' failed — restarting AP"
+                nmcli device wifi hotspot \
+                  ifname "$wifi_iface" \
+                  ssid "$AP_SSID" \
+                  password "$AP_PASSWORD" 2>/dev/null || true
+                sleep 3
+              fi
+            done
           }
 
-          parse_field() {
-            # parse_field "ssid" "ssid=MyNet&password=abc"
-            local field="$1"
-            local body="$2"
-            local val
-            val=$(echo "$body" | grep -o "${field}=[^&]*" | cut -d= -f2-)
-            url_decode "$val"
-          }
+          # ── main ──────────────────────────────────────────────────────────────
 
-          # ── HTML pages ─────────────────────────────────────────────────────
+          log "Starting Holo Node first-boot setup"
 
-          FORM_HTML='<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>Holo Node Setup</title>
-          <style>
-          *{box-sizing:border-box;margin:0;padding:0}
-          body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-            background:#0a0a0f;color:#e8e8f0;min-height:100vh;
-            display:flex;align-items:center;justify-content:center;padding:20px}
-          .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
-            padding:40px;width:100%;max-width:420px}
-          h1{font-size:22px;font-weight:600;color:#a78bfa;text-align:center;margin-bottom:8px}
-          .sub{text-align:center;color:#666680;font-size:13px;margin-bottom:28px}
-          .info{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
-            padding:14px 16px;font-size:13px;color:#9999bb;margin-bottom:28px;line-height:1.5}
-          label{display:block;font-size:13px;font-weight:500;color:#9999bb;
-            margin-bottom:6px;margin-top:20px}
-          label:first-of-type{margin-top:0}
-          input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;
-            border-radius:8px;padding:10px 14px;color:#e8e8f0;font-size:15px;outline:none}
-          button{width:100%;background:#7c3aed;color:white;border:none;
-            border-radius:8px;padding:12px;font-size:15px;font-weight:600;
-            cursor:pointer;margin-top:28px}
-          </style></head><body><div class="card">
-          <h1>Holo Node Setup</h1>
-          <p class="sub">WiFi Configuration</p>
-          <div class="info">Your node is in setup mode. You are connected to
-          <strong>HoloNode-Setup</strong>. Enter your home WiFi credentials to
-          connect your node to the internet.</div>
-          <form method="POST" action="/connect">
-          <label for="ssid">WiFi Network Name (SSID)</label>
-          <input type="text" id="ssid" name="ssid" placeholder="Your WiFi network" required>
-          <label for="password">WiFi Password</label>
-          <input type="password" id="password" name="password" placeholder="Your WiFi password">
-          <button type="submit">Connect &amp; Continue</button>
-          </form></div></body></html>'
-
-          CONNECTING_HTML='<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>Holo Node — Connecting</title>
-          <style>
-          *{box-sizing:border-box;margin:0;padding:0}
-          body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-            background:#0a0a0f;color:#e8e8f0;min-height:100vh;
-            display:flex;align-items:center;justify-content:center;padding:20px}
-          .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
-            padding:40px;width:100%;max-width:420px;text-align:center}
-          h1{font-size:20px;color:#a78bfa;margin-bottom:12px}
-          p{color:#666680;font-size:14px;line-height:1.6}
-          .spinner{width:40px;height:40px;border:3px solid #2a2a3a;
-            border-top-color:#7c3aed;border-radius:50%;
-            animation:spin .8s linear infinite;margin:28px auto}
-          @keyframes spin{to{transform:rotate(360deg)}}
-          .note{margin-top:24px;background:#1a1a2e;border:1px solid #2a2a4a;
-            border-radius:10px;padding:14px 16px;font-size:13px;
-            color:#9999bb;line-height:1.5;text-align:left}
-          </style></head><body><div class="card">
-          <h1>Connecting...</h1>
-          <div class="spinner"></div>
-          <p>Connecting your node to your WiFi network.<br>This may take up to 30 seconds.</p>
-          <div class="note">Your device will disconnect from HoloNode-Setup.
-          Once the node is online, find its IP address on your router and open
-          <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.</div>
-          </div></body></html>'
-
-          # ── main ───────────────────────────────────────────────────────────
-
-          log "Starting node setup"
-
-          # Wait for NetworkManager
+          # Wait for NetworkManager to be ready (up to 30s)
           for i in $(seq 1 30); do
             nmcli general status &>/dev/null && break
             sleep 1
           done
 
-          # Fast path: ethernet / existing connection has internet
+          # Fast path: ethernet / existing connection already has internet
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
@@ -256,48 +367,12 @@ storage:
           }
           sleep 3
 
-          log "AP running. Serving setup UI on http://${AP_IP}:${LISTEN_PORT}"
+          log "AP running. Serving setup UI on port ${LISTEN_PORT}"
+          serve_http_loop "$WIFI_IFACE"
 
-          while true; do
-            body=$(serve_one_request "$FORM_HTML")
-
-            if echo "$body" | grep -q "ssid="; then
-              SSID=$(parse_field "ssid" "$body")
-              PASSWORD=$(parse_field "password" "$body")
-
-              if [ -z "$SSID" ]; then
-                log "Empty SSID submitted, retrying"
-                continue
-              fi
-
-              log "Attempting to connect to '${SSID}'"
-
-              # Send the connecting page before dropping the AP
-              serve_one_request "$CONNECTING_HTML" &>/dev/null &
-
-              # Drop AP and connect to target network
-              nmcli device disconnect "$WIFI_IFACE" 2>/dev/null || true
-              sleep 2
-
-              nmcli device wifi connect "$SSID" \
-                password "$PASSWORD" \
-                ifname "$WIFI_IFACE" 2>/dev/null || true
-              sleep 8
-
-              if has_internet; then
-                log "Connected to '${SSID}' and internet confirmed"
-                download_binary
-                exit 0
-              else
-                log "Connection to '${SSID}' failed, restarting AP"
-                nmcli device wifi hotspot \
-                  ifname "$WIFI_IFACE" \
-                  ssid "$AP_SSID" \
-                  password "$AP_PASSWORD" 2>/dev/null || true
-                sleep 3
-              fi
-            fi
-          done
+          log "WiFi configured — downloading node-onboarding"
+          download_binary
+          exit 0
 
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
