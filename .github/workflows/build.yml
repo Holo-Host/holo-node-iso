@@ -43,7 +43,7 @@ jobs:
           COREOS_URL=$(curl -sf \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             https://api.github.com/repos/coreos/coreos-installer/releases/latest \
-            | jq -r '.assets[] | select(.name == "coreos-installer_x86_64") | .browser_download_url' \
+            | jq -r '.assets[] | select(.name | contains("x86_64-unknown-linux-gnu")) | .browser_download_url' \
             | tr -d '[:space:]')
           
           if [ -z "$COREOS_URL" ]; then
