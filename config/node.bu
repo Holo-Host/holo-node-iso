@@ -66,53 +66,64 @@ storage:
           MaxAuthTries 3
           LoginGraceTime 30
 
-    # ── node-onboarding binary ─────────────────────────────────────────────────
-    # The build script copies the binary here before running Butane.
-    # Butane embeds it as a base64-encoded file inside the Ignition JSON.
-    - path: /usr/local/bin/node-onboarding
+    # ── ap-setup binary ────────────────────────────────────────────────────────
+    # Small enough to embed in the initramfs. Handles WiFi config and downloads
+    # the full node-onboarding binary on first boot.
+    - path: /usr/local/bin/node-ap-setup
       mode: 0755
       contents:
-        local: node-onboarding   # path relative to config/ directory
-
-    # ── network-check.sh ──────────────────────────────────────────────────────
-    - path: /usr/local/bin/network-check.sh
-      mode: 0755
-      contents:
-        inline: |
-          #!/bin/bash
-          # Check whether we have a routable Ethernet interface.
-          # If not, set AP_MODE=true so the onboarding UI shows the Wi-Fi form.
-          if ip -4 route show default | grep -qv 'wl'; then
-            echo "AP_MODE=false"
-          else
-            echo "AP_MODE=true"
-          fi
+        local: node-ap-setup   # build.sh copies the arch binary here before butane runs
 
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
   units:
+    # ── node-ap-setup.service ──────────────────────────────────────────────────
+    # Runs once on first boot of the installed system.
+    # If ethernet/internet is available: downloads node-onboarding and exits.
+    # If no internet: starts a WiFi AP, serves a form, connects, then downloads.
+    # Never runs again because node-onboarding binary will exist after first run.
+    - name: node-ap-setup.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Holo Node AP Setup (first-boot WiFi configuration)
+        After=network.target NetworkManager.service
+        Wants=NetworkManager.service
+        ConditionPathExists=!/usr/local/bin/node-onboarding
+        Before=node-onboarding.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/local/bin/node-ap-setup
+        StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=node-ap-setup
+        # Generous timeout — WiFi setup is interactive and may take time
+        TimeoutStartSec=600
+
+        [Install]
+        WantedBy=multi-user.target
+
     # ── node-onboarding.service ────────────────────────────────────────────────
-    # Permanent service — runs forever, not just during onboarding.
+    # Does not start until node-ap-setup has finished (and downloaded the binary).
     - name: node-onboarding.service
       enabled: true
       contents: |
         [Unit]
         Description=Holo Node Onboarding & Management Server
-        After=network-online.target
+        After=network-online.target node-ap-setup.service
         Wants=network-online.target
+        Requires=node-ap-setup.service
 
         [Service]
         Type=simple
-        ExecStartPre=/usr/local/bin/network-check.sh
-        EnvironmentFile=-/run/node-onboarding-env
         ExecStart=/usr/local/bin/node-onboarding
         Restart=always
         RestartSec=5
         StandardOutput=journal
         StandardError=journal
         SyslogIdentifier=node-onboarding
-        # The service must be able to write to /etc/node-onboarding and
-        # /home/holo/.ssh — do not add ReadOnlyPaths or PrivateTmp here.
         NoNewPrivileges=yes
 
         [Install]
