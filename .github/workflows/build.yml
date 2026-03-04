@@ -40,20 +40,8 @@ jobs:
           chmod +x /usr/local/bin/butane
 
           # coreos-installer
-          COREOS_URL=$(curl -sf \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/coreos/coreos-installer/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("x86_64-unknown-linux-gnu")) | .browser_download_url' \
-            | tr -d '[:space:]')
-          
-          if [ -z "$COREOS_URL" ]; then
-            echo "ERROR: Could not resolve coreos-installer download URL"
-            exit 1
-          fi
-          
-          echo "Downloading coreos-installer from: $COREOS_URL"
-          curl -L "$COREOS_URL" -o /usr/local/bin/coreos-installer
-          chmod +x /usr/local/bin/coreos-installer
+          cargo install coreos-installer
+          sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
 
           butane --version
           coreos-installer --version
