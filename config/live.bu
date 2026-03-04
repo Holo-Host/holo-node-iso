@@ -1,0 +1,49 @@
+variant: fcos
+version: 1.5.0
+
+systemd:
+  units:
+    - name: coreos-installer-detect-disk.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Detect install target disk
+        DefaultDependencies=no
+        After=basic.target
+        Before=coreos-installer.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/local/bin/detect-disk.sh
+
+        [Install]
+        WantedBy=coreos-installer-pre.target
+
+  storage:
+    files:
+      - path: /usr/local/bin/detect-disk.sh
+        mode: 0755
+        contents:
+          inline: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+
+            # Find the first non-removable, non-loop, non-ISO disk
+            for dev in /sys/block/*; do
+              name=$(basename "$dev")
+              # Skip loops, sr (optical), zram
+              [[ "$name" =~ ^(loop|sr|zram) ]] && continue
+              # Skip removable devices (USB sticks)
+              removable=$(cat "$dev/removable" 2>/dev/null || echo 0)
+              [ "$removable" = "1" ] && continue
+              # Found it
+              DISK="/dev/${name}"
+              echo "Detected install target: $DISK"
+              # Patch the coreos-installer config
+              echo "dest-device: $DISK" >> /etc/coreos/installer.d/0001-disk.yaml
+              exit 0
+            done
+
+            echo "ERROR: No suitable install disk found"
+            exit 1

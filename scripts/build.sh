@@ -6,8 +6,9 @@ FCOS_STREAM="stable"
 OUTPUT="holo-node-${ARCH}.iso"
 CONFIG_DIR="$(cd "$(dirname "$0")/../config" && pwd)"
 
-echo "==> Compiling Butane config"
-butane --strict "${CONFIG_DIR}/node.bu" > ignition.json
+echo "==> Compiling Butane configs"
+butane --strict "${CONFIG_DIR}/node.bu" > dest-ignition.json
+butane --strict "${CONFIG_DIR}/live.bu" > live-ignition.json
 
 echo "==> Downloading FCOS ${FCOS_STREAM} base image (${ARCH})"
 coreos-installer download \
@@ -25,13 +26,13 @@ echo "    Downloaded: $FCOS_ISO"
 
 echo "==> Embedding Ignition config into ISO"
 coreos-installer iso customize \
-    --dest-ignition ignition.json \
-    --dest-device /dev/sda \
+    --dest-ignition dest-ignition.json \
+    --live-ignition live-ignition.json \
     --output "$OUTPUT" \
     "$FCOS_ISO"
 
 echo "==> Cleaning up"
-rm -f "$FCOS_ISO" ignition.json
+rm -f "$FCOS_ISO" dest-ignition.json live-ignition.json
 
 echo ""
 echo "==> Done! Output: ${OUTPUT}"
