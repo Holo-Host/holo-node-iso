@@ -1,6 +1,6 @@
 # holo-node-iso
 
-Builds the Holo Sovereign Node operating system image — a customised Fedora CoreOS (FCOS) image that boots directly into the Holo node stack.
+Builds the Holo Node operating system image — a customised Fedora CoreOS (FCOS) image that boots directly into the Holo node stack.
 
 The image is built using [Butane](https://coreos.github.io/butane/) (which compiles a human-readable YAML config to Ignition JSON) and [coreos-installer](https://coreos.github.io/coreos-installer/) to produce a bootable ISO. The resulting ISO is what node operators flash to their hardware.
 
