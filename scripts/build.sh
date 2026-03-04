@@ -42,7 +42,7 @@ fetch_asset "$ONBOARDING_REPO" "node-onboarding-${ARCH}" "${CONFIG_DIR}/node-onb
 fetch_asset "$AP_SETUP_REPO"   "node-ap-setup-${ARCH}"   "${CONFIG_DIR}/node-ap-setup"
 
 echo "==> Compiling Butane config"
-butane --strict "${CONFIG_DIR}/node.bu" > ignition.json
+butane --strict --files-dir "${CONFIG_DIR}" "${CONFIG_DIR}/node.bu" > ignition.json
 
 echo "==> Downloading FCOS ${FCOS_STREAM} base image (${ARCH})"
 coreos-installer download \
