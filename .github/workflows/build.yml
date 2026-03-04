@@ -31,7 +31,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y curl jq
+          sudo apt-get install -y curl jq xz-utils
 
           # Butane
           curl -L \
@@ -39,9 +39,11 @@ jobs:
             -o /usr/local/bin/butane
           chmod +x /usr/local/bin/butane
 
-          # coreos-installer
-          cargo install coreos-installer
-          sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
+          # coreos-installer — download pre-built binary, do NOT use cargo install
+          curl -L \
+            https://github.com/coreos/coreos-installer/releases/latest/download/coreos-installer_x86_64 \
+            -o /usr/local/bin/coreos-installer
+          chmod +x /usr/local/bin/coreos-installer
 
           butane --version
           coreos-installer --version
