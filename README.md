@@ -10,15 +10,16 @@ The image is built using [Butane](https://coreos.github.io/butane/) (which compi
 
 1. [How it fits into the system](#how-it-fits-into-the-system)
 2. [What's in the image](#whats-in-the-image)
-3. [Prerequisites](#prerequisites)
-4. [Repository structure](#repository-structure)
-5. [Building locally](#building-locally)
-6. [Ignition configuration reference](#ignition-configuration-reference)
-7. [Setting up the GitHub Actions pipeline](#setting-up-the-github-actions-pipeline)
-8. [Shipping a new ISO release](#shipping-a-new-iso-release)
-9. [Relationship between this repo and node-onboarding](#relationship-between-this-repo-and-node-onboarding)
-10. [Testing a build](#testing-a-build)
-11. [Troubleshooting](#troubleshooting)
+3. [First-boot flow](#first-boot-flow)
+4. [Prerequisites](#prerequisites)
+5. [Repository structure](#repository-structure)
+6. [Building locally](#building-locally)
+7. [Ignition configuration reference](#ignition-configuration-reference)
+8. [Setting up the GitHub Actions pipeline](#setting-up-the-github-actions-pipeline)
+9. [Shipping a new ISO release](#shipping-a-new-iso-release)
+10. [Relationship between this repo and node-onboarding](#relationship-between-this-repo-and-node-onboarding)
+11. [Testing a build](#testing-a-build)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -30,16 +31,18 @@ holo-host/node-onboarding            holo-host/holo-node-iso
         │  Rust source + release               │  Butane YAML + build scripts
         │  pipeline                            │
         │                                      │
-        │  Publishes binaries:                 │  build.sh fetches the binary
-        │  node-onboarding-x86_64    ◄─────────┤  from the latest release
-        │  node-onboarding-aarch64             │
-        │                                      │  Produces:
-        │                                      │  holo-node-x86_64.iso
-        │                                      │  holo-node-aarch64.iso
+        │  Publishes binaries:                 │  Produces:
+        │  node-onboarding-x86_64             │  holo-node-x86_64.iso
+        │  node-onboarding-aarch64            │  holo-node-aarch64.iso
+        │                                      │
+        │  ◄── downloaded at first boot ───────┤  (node-setup.sh fetches the
+        │       by node-setup.sh               │   binary on first boot)
         ▼                                      ▼
 
                      Node operator
-                     flashes ISO → hardware boots → visits http://<ip>:8080
+                     flashes ISO → hardware auto-installs FCOS → reboots
+                     → node-setup.sh runs → downloads node-onboarding
+                     → operator visits http://<ip>:8080
                      → completes setup wizard → node is running
 ```
 
@@ -47,7 +50,6 @@ Once a node is running, **the node-onboarding binary updates itself automaticall
 
 - The FCOS base image needs updating (security patches, kernel updates)
 - The Ignition/systemd configuration changes
-- A new version of the node-onboarding binary needs to be baked in at first boot (i.e. for nodes being freshly provisioned — they will update themselves afterward anyway)
 
 ---
 
@@ -56,26 +58,59 @@ Once a node is running, **the node-onboarding binary updates itself automaticall
 | Component | Description |
 |-----------|-------------|
 | Fedora CoreOS (FCOS) | Minimal immutable OS base; automatic OS updates via rpm-ostree |
-| `node-onboarding` binary | The onboarding + management server; fetched from GitHub Releases at ISO build time |
-| `node-onboarding.service` | systemd unit that starts the server on boot |
-| `install-zeroclaw.service` | systemd unit that installs the ZeroClaw agent on first boot (only runs if the operator enables the agent during onboarding) |
-| `network-check.sh` | Checks for network connectivity; sets `AP_MODE=true` environment variable if only Wi-Fi is available |
+| `node-setup.sh` | Inlined bash script; runs once on first boot to download `node-onboarding`. On ethernet nodes it downloads directly. On WiFi-only nodes it starts a temporary AP and serves a WiFi credentials form first. |
+| `node-setup.service` | systemd unit that runs `node-setup.sh` on first boot only |
+| `node-onboarding.service` | systemd unit that starts the management server after `node-setup.service` completes |
+| `install-zeroclaw.service` | systemd unit that installs the ZeroClaw agent on first boot (only if operator enables it during onboarding) |
 | Podman + crun | Container runtime; no Docker daemon |
 | `holo` user | Dedicated low-privilege user for SSH access |
 | SSH hardening | Root login disabled; password auth disabled; SSH keys only |
+
+**Note:** The `node-onboarding` binary is not embedded in the ISO. It is downloaded at first boot by `node-setup.sh`. This keeps the ISO small and avoids the 262KB initramfs size limit imposed by `coreos-installer iso customize`.
+
+---
+
+## First-boot flow
+
+### Ethernet nodes (most common)
+
+```
+ISO boots → FCOS auto-installs to internal disk → reboots from disk
+→ node-setup.service starts
+→ node-setup.sh detects internet via ethernet
+→ downloads node-onboarding from GitHub Releases
+→ node-setup.service exits
+→ node-onboarding.service starts
+→ operator opens http://<node-ip>:8080 → completes setup
+→ node-setup.service never runs again (binary now exists on disk)
+```
+
+### WiFi-only nodes
+
+```
+ISO boots → FCOS auto-installs to internal disk → reboots from disk
+→ node-setup.service starts
+→ node-setup.sh detects no internet
+→ starts WiFi AP: SSID "HoloNode-Setup", password "holonode"
+→ serves WiFi credentials form at http://192.168.4.1:8080
+→ operator connects phone/laptop to HoloNode-Setup
+→ operator opens http://192.168.4.1:8080
+→ operator enters home WiFi SSID and password → submits
+→ node connects to WiFi, downloads node-onboarding
+→ node-setup.service exits
+→ node-onboarding.service starts
+→ operator connects to home network, opens http://<node-ip>:8080
+→ completes setup
+```
 
 ---
 
 ## Prerequisites
 
-Install these tools on your build machine. All are available on Linux; macOS instructions are in parentheses.
-
 ### Butane
 
-Translates the human-readable `.bu` YAML config to Ignition JSON.
-
 ```bash
-# Linux (download binary)
+# Linux
 curl -L https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
   -o /usr/local/bin/butane
 chmod +x /usr/local/bin/butane
@@ -86,30 +121,20 @@ brew install butane
 
 ### coreos-installer
 
-Downloads the FCOS base image and customises it with the Ignition config to produce the final ISO.
-
 ```bash
-# Linux (via cargo)
+# Linux (via cargo — takes ~3 minutes to compile)
 cargo install coreos-installer
 
 # Linux (Fedora/RHEL)
 sudo dnf install coreos-installer
-
-# macOS — run coreos-installer in a container (easiest)
-# See "Building locally on macOS" below
 ```
 
 ### curl and jq
 
-Used by `build.sh` to fetch the latest node-onboarding binary from GitHub Releases.
-
 ```bash
-# Linux
 sudo apt install curl jq   # Debian/Ubuntu
 sudo dnf install curl jq   # Fedora
-
-# macOS
-brew install curl jq
+brew install curl jq       # macOS
 ```
 
 ---
@@ -121,11 +146,10 @@ holo-node-iso/
 ├── config/
 │   └── node.bu              ← Butane YAML — the human-editable config
 ├── scripts/
-│   ├── build.sh             ← main build script
-│   └── network-check.sh     ← embedded in the image; runs at boot
+│   └── build.sh             ← main build script
 ├── .github/
 │   └── workflows/
-│       └── build.yml        ← GitHub Actions: builds ISOs on push to main / on tag
+│       └── build.yml        ← GitHub Actions: builds ISOs on push/release
 └── README.md
 ```
 
@@ -143,11 +167,12 @@ chmod +x scripts/build.sh
 ```
 
 This will:
-1. Fetch the latest `node-onboarding-x86_64` binary from `holo-host/node-onboarding` GitHub Releases
-2. Compile `config/node.bu` → `ignition.json` using Butane
-3. Download the latest stable FCOS ISO for x86_64
-4. Embed the Ignition config into the ISO using coreos-installer
-5. Output `holo-node-x86_64.iso` in the project root
+1. Compile `config/node.bu` → `ignition.json` using Butane
+2. Download the latest stable FCOS ISO for x86_64
+3. Embed the Ignition config into the ISO using coreos-installer
+4. Output `holo-node-x86_64.iso` in the project root
+
+Note: `node-onboarding` is **not** fetched at build time. It is downloaded by `node-setup.sh` on the node's first boot.
 
 ### Building for ARM (aarch64)
 
@@ -155,24 +180,6 @@ This will:
 ARCH=aarch64 ./scripts/build.sh
 # Outputs holo-node-aarch64.iso
 ```
-
-### Building on macOS
-
-`coreos-installer` does not run natively on macOS. Use the official container image:
-
-```bash
-docker run --rm -it \
-  -v "$(pwd)":/work \
-  -w /work \
-  quay.io/coreos/coreos-installer:release \
-  iso customize \
-    --dest-ignition ignition.json \
-    --dest-device /dev/null \
-    --output holo-node-x86_64.iso \
-    fcos-base.iso
-```
-
-`build.sh` detects macOS and falls back to this automatically if Docker is available.
 
 ### `build.sh` in full
 
@@ -182,63 +189,44 @@ set -euo pipefail
 
 ARCH="${ARCH:-x86_64}"
 FCOS_STREAM="stable"
-ONBOARDING_REPO="holo-host/node-onboarding"
-ASSET_NAME="node-onboarding-${ARCH}"
 OUTPUT="holo-node-${ARCH}.iso"
-
-echo "==> Fetching latest node-onboarding binary for ${ARCH}"
-RELEASE_JSON=$(curl -sf \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/${ONBOARDING_REPO}/releases/latest")
-
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | \
-  jq -r ".assets[] | select(.name == \"${ASSET_NAME}\") | .browser_download_url")
-
-if [ -z "$DOWNLOAD_URL" ]; then
-  echo "ERROR: Could not find asset '${ASSET_NAME}' in latest release"
-  exit 1
-fi
-
-curl -L "$DOWNLOAD_URL" -o config/node-onboarding
-chmod +x config/node-onboarding
+CONFIG_DIR="$(cd "$(dirname "$0")/../config" && pwd)"
 
 echo "==> Compiling Butane config"
-butane --strict config/node.bu > ignition.json
+butane --strict "${CONFIG_DIR}/node.bu" > ignition.json
 
-echo "==> Downloading FCOS base image"
+echo "==> Downloading FCOS ${FCOS_STREAM} base image (${ARCH})"
 coreos-installer download \
-  --stream "$FCOS_STREAM" \
-  --architecture "$ARCH" \
-  --format iso \
-  --decompress \
-  --output fcos-base.iso
+    --stream "$FCOS_STREAM" \
+    --architecture "$ARCH" \
+    --format iso \
+    --decompress
 
-echo "==> Embedding Ignition config"
+FCOS_ISO=$(ls fedora-coreos-*.iso 2>/dev/null | head -1)
+if [ -z "$FCOS_ISO" ]; then
+    echo "ERROR: Could not find downloaded FCOS ISO"
+    exit 1
+fi
+
+echo "==> Embedding Ignition config into ISO"
 coreos-installer iso customize \
-  --dest-ignition ignition.json \
-  --output "$OUTPUT" \
-  fcos-base.iso
+    --dest-ignition ignition.json \
+    --output "$OUTPUT" \
+    "$FCOS_ISO"
 
-echo "==> Done: ${OUTPUT}"
-rm -f fcos-base.iso ignition.json config/node-onboarding
+rm -f "$FCOS_ISO" ignition.json
+echo "==> Done! Output: ${OUTPUT}"
 ```
 
 ---
 
 ## Ignition configuration reference
 
-`config/node.bu` is the Butane YAML that defines everything about how the node is configured at first boot. Here is the full reference for every section, including the changes required from a stock FCOS config.
+`config/node.bu` defines everything about how the node is configured at first boot.
 
-### Minimal working `node.bu`
+### Users
 
 ```yaml
-variant: fcos
-version: 1.5.0
-
-# ── Users ─────────────────────────────────────────────────────────────────────
-# The `holo` user is the only SSH-accessible user on the node.
-# Root login is disabled. The node-onboarding server manages authorized_keys
-# for this user via the /manage panel — no keys are baked in here.
 passwd:
   users:
     - name: holo
@@ -246,150 +234,33 @@ passwd:
       home_dir: /home/holo
       groups:
         - systemd-journal
-      # No ssh_authorized_keys here — the operator adds them via the UI.
-      # If you want a fallback key for recovery, add it here:
-      # ssh_authorized_keys:
-      #   - "ssh-ed25519 AAAA... recovery key"
-
-# ── Storage ───────────────────────────────────────────────────────────────────
-storage:
-  directories:
-    # /home/holo/.ssh must exist with correct permissions before the
-    # node-onboarding server tries to write authorized_keys into it.
-    - path: /home/holo/.ssh
-      user:
-        name: holo
-      group:
-        name: holo
-      mode: 0700
-
-    # State directory for the onboarding server.
-    - path: /etc/node-onboarding
-      mode: 0700
-
-    # ZeroClaw config directory (created by onboarding if agent is enabled,
-    # but having it here avoids a permission issue if the directory doesn't exist).
-    - path: /etc/zeroclaw
-      mode: 0700
-
-    # Quadlet directory — Podman reads this to create systemd units.
-    - path: /etc/containers/systemd
-      mode: 0755
-
-    # EdgeNode persistent data.
-    - path: /var/lib/edgenode
-      mode: 0755
-
-    # ZeroClaw workspace — the agent reads/writes mode_switch.txt here.
-    - path: /var/lib/zeroclaw/workspace
-      mode: 0755
-
-  files:
-    # ── SSH hardening ──────────────────────────────────────────────────────────
-    # Drop-in that overrides the FCOS default sshd config.
-    - path: /etc/ssh/sshd_config.d/90-holo.conf
-      mode: 0600
-      contents:
-        inline: |
-          # Holo Sovereign Node — SSH hardening
-          PermitRootLogin no
-          PasswordAuthentication no
-          ChallengeResponseAuthentication no
-          AuthorizedKeysFile .ssh/authorized_keys
-          AllowUsers holo
-          MaxAuthTries 3
-          LoginGraceTime 30
-
-    # ── node-onboarding binary ─────────────────────────────────────────────────
-    # The build script copies the binary here before running Butane.
-    # Butane embeds it as a base64-encoded file inside the Ignition JSON.
-    - path: /usr/local/bin/node-onboarding
-      mode: 0755
-      contents:
-        local: node-onboarding   # path relative to config/ directory
-
-    # ── network-check.sh ──────────────────────────────────────────────────────
-    - path: /usr/local/bin/network-check.sh
-      mode: 0755
-      contents:
-        inline: |
-          #!/bin/bash
-          # Check whether we have a routable Ethernet interface.
-          # If not, set AP_MODE=true so the onboarding UI shows the Wi-Fi form.
-          if ip -4 route show default | grep -qv 'wl'; then
-            echo "AP_MODE=false"
-          else
-            echo "AP_MODE=true"
-          fi
-
-# ── systemd units ─────────────────────────────────────────────────────────────
-systemd:
-  units:
-    # ── node-onboarding.service ────────────────────────────────────────────────
-    # Permanent service — runs forever, not just during onboarding.
-    - name: node-onboarding.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Holo Node Onboarding & Management Server
-        After=network-online.target
-        Wants=network-online.target
-
-        [Service]
-        Type=simple
-        ExecStartPre=/usr/local/bin/network-check.sh
-        EnvironmentFile=-/run/node-onboarding-env
-        ExecStart=/usr/local/bin/node-onboarding
-        Restart=always
-        RestartSec=5
-        StandardOutput=journal
-        StandardError=journal
-        SyslogIdentifier=node-onboarding
-        # The service must be able to write to /etc/node-onboarding and
-        # /home/holo/.ssh — do not add ReadOnlyPaths or PrivateTmp here.
-        NoNewPrivileges=yes
-
-        [Install]
-        WantedBy=multi-user.target
-
-    # ── install-zeroclaw.service ───────────────────────────────────────────────
-    # Runs on first boot only if the operator enabled the AI agent.
-    # node-onboarding manages whether this runs by creating/removing its
-    # enablement symlink. You don't need to enable it here.
-    - name: install-zeroclaw.service
-      contents: |
-        [Unit]
-        Description=Install ZeroClaw AI Agent
-        After=network-online.target
-        ConditionPathExists=!/etc/zeroclaw/installed
-        Before=node-onboarding.service
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=yes
-        ExecStart=/usr/local/bin/install-zeroclaw.sh
-        StandardOutput=journal
-        StandardError=journal
-
-        [Install]
-        WantedBy=multi-user.target
-
-    # ── podman-auto-update.timer ───────────────────────────────────────────────
-    # Automatically updates container images daily via Podman.
-    - name: podman-auto-update.timer
-      enabled: true
 ```
 
-### Key decisions explained
+The `holo` user is the only SSH-accessible account. No SSH keys are baked in — the operator adds them via the management UI after setup. To add a permanent recovery key that the UI cannot remove, add it to `ssh_authorized_keys` here.
 
-**Why no SSH keys in the Ignition config?**
-The node-onboarding server manages `/home/holo/.ssh/authorized_keys` at runtime via the `/manage` panel. Baking keys into Ignition means they cannot be changed without a new ISO. If you want a permanent recovery key that cannot be removed through the UI, add it to `passwd.users[holo].ssh_authorized_keys` — keys written there by Ignition are separate from the ones managed by the server.
+### node-setup.sh
 
-**Why is `install-zeroclaw.service` not enabled?**
-The onboarding server enables it conditionally — only if the operator opts in to the AI agent. The `ConditionPathExists=!/etc/zeroclaw/installed` guard ensures it only runs once.
+The first-boot script is inlined directly in `node.bu` via `contents.inline`. It is a bash script, not a binary — this is intentional. Any binary large enough to be useful would exceed the 262KB initramfs size limit imposed by `coreos-installer iso customize`. A bash script compresses to a few KB.
 
-**Why no firewall rules here?**
-FCOS ships with `firewalld` enabled by default. Port 8080 is not open in the default zone. You should add a Butane rule to open it on the `home` or `internal` zone, not `public`. Example:
+The script:
+- Waits for NetworkManager to be ready
+- Tests for internet connectivity via `curl`
+- **Ethernet path:** downloads `node-onboarding` from the latest GitHub Release and exits
+- **WiFi path:** finds the WiFi interface, starts a hotspot via `nmcli`, serves a WiFi credentials form via an HTTP server loop using `nc`, connects to the provided network, then downloads `node-onboarding`
+- Is guarded by `ConditionPathExists=!/usr/local/bin/node-onboarding` in its service unit — never runs again once the binary exists on disk
+
+### systemd units
+
+| Unit | Enabled | Purpose |
+|------|---------|---------|
+| `node-setup.service` | yes | Runs `node-setup.sh` once on first boot |
+| `node-onboarding.service` | yes | Starts the management server; requires `node-setup.service` |
+| `install-zeroclaw.service` | no | Installs ZeroClaw agent; enabled conditionally by node-onboarding |
+| `podman-auto-update.timer` | yes | Daily container image updates |
+
+### Firewall note
+
+FCOS ships with `firewalld` enabled. Port 8080 is not open by default. If you cannot reach the setup UI, add a firewalld rule to `node.bu`:
 
 ```yaml
 storage:
@@ -410,7 +281,12 @@ storage:
 
 ## Setting up the GitHub Actions pipeline
 
-Create `.github/workflows/build.yml`:
+The pipeline uses two jobs to work around the fact that `coreos-installer` must be compiled from source (~3 minutes) and GitHub Actions runners don't cache between jobs by default:
+
+- **`setup-tools`** — compiles and caches `coreos-installer`; only recompiles on a cache miss
+- **`build`** — runs in parallel for x86_64 and aarch64; restores the cache from `setup-tools`
+
+Full `build.yml`:
 
 ```yaml
 name: Build ISO
@@ -421,14 +297,33 @@ on:
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      arch:
-        description: 'Architecture (x86_64 or aarch64)'
-        default: 'x86_64'
 
 jobs:
-  build:
+  setup-tools:
     runs-on: ubuntu-latest
+    steps:
+      - name: Install Butane
+        run: |
+          curl -fsSL \
+            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
+            -o /usr/local/bin/butane
+          chmod +x /usr/local/bin/butane
+
+      - name: Cache coreos-installer
+        id: cache-coreos-installer
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/coreos-installer
+          key: coreos-installer-v0.25.0
+
+      - name: Build coreos-installer
+        if: steps.cache-coreos-installer.outputs.cache-hit != 'true'
+        run: cargo install coreos-installer
+
+  build:
+    needs: setup-tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         arch: [x86_64, aarch64]
@@ -436,15 +331,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Free disk space
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq
-          # Install Butane
-          curl -L https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-            -o /usr/local/bin/butane && chmod +x /usr/local/bin/butane
-          # Install coreos-installer
-          cargo install coreos-installer
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc &
+          wait
+
+      - name: Install Butane
+        run: |
+          curl -fsSL \
+            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
+            -o /usr/local/bin/butane
+          chmod +x /usr/local/bin/butane
+
+      - name: Restore coreos-installer
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/coreos-installer
+          key: coreos-installer-v0.25.0
+
+      - name: Install coreos-installer
+        run: |
+          if [ ! -f ~/.cargo/bin/coreos-installer ]; then
+            cargo install coreos-installer
+          fi
+          sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
+
+      - name: Install curl and jq
+        run: sudo apt-get install -y curl jq
 
       - name: Build ISO (${{ matrix.arch }})
         env:
@@ -453,7 +366,7 @@ jobs:
           chmod +x scripts/build.sh
           ./scripts/build.sh
 
-      - name: Upload ISO artifact
+      - name: Upload ISO as artifact
         uses: actions/upload-artifact@v4
         with:
           name: holo-node-${{ matrix.arch }}-iso
@@ -467,7 +380,9 @@ jobs:
           files: holo-node-${{ matrix.arch }}.iso
 ```
 
-After pushing this file, every push to `main` produces downloadable ISO artifacts on the Actions run page. Every GitHub Release automatically gets both ISOs attached.
+**On artifacts vs releases:** Pushes to `main` upload ISOs as workflow artifacts (downloadable from the Actions run page for 30 days). The "Attach to GitHub Release" step is intentionally skipped — the circle-with-slash icon next to it is expected. ISOs are only attached to a release when you create one with a tag.
+
+**On the cache:** The first run after a cache miss compiles coreos-installer (~3 minutes). Every subsequent run skips this. To upgrade coreos-installer, bump the `key` value in both cache steps.
 
 ---
 
@@ -477,119 +392,123 @@ After pushing this file, every push to `main` produces downloadable ISO artifact
 
 | Scenario | New ISO needed? |
 |----------|----------------|
-| Bug fix or feature in the management UI | **No** — ship a `node-onboarding` release; nodes update themselves |
+| Bug fix or feature in the management UI | **No** — ship a `node-onboarding` release; nodes update within ~1 hour |
 | New chat platform support | **No** — ship a `node-onboarding` release |
 | FCOS base image security update | **Yes** |
-| Changes to systemd units or sshd config | **Yes** |
-| New version of node-onboarding for *fresh* provisioning | Optional — nodes will self-update anyway, but baking in a recent version reduces the update delay at first boot |
+| Changes to systemd units, sshd config, or `node-setup.sh` | **Yes** |
+| New hardware support | **Yes** if kernel or firmware changes are needed |
 
 ### Steps
 
-1. Make your changes to `config/node.bu` (and/or `scripts/`).
-2. Test locally: `./scripts/build.sh && ./scripts/build.sh ARCH=aarch64`
-3. Flash and boot the x86_64 ISO in a VM to verify (see [Testing a build](#testing-a-build)).
-4. Commit and push to `main`.
-5. Create a GitHub Release: tag it `iso-v<date>` e.g. `iso-v2025-09-01`. GitHub Actions builds both ISOs and attaches them to the release automatically.
-6. Update your node distribution page / download link to point at the new release.
+1. Make changes to `config/node.bu` and/or `scripts/build.sh`
+2. Validate: `butane --strict --check config/node.bu`
+3. Build and test locally: `./scripts/build.sh`
+4. Boot in a VM to verify end-to-end (see [Testing a build](#testing-a-build))
+5. Push to `main` — builds artifacts you can download and test
+6. When ready to ship: create a GitHub Release tagged `iso-v<date>` e.g. `iso-v2026-03-04`
+7. Actions builds both ISOs and attaches them to the release automatically
+8. Update your node distribution page / download link to point at the new release
 
 ---
 
 ## Relationship between this repo and node-onboarding
 
-These two repos have a one-way dependency: `holo-node-iso` fetches a binary from `holo-host/node-onboarding` at build time. `node-onboarding` does not know about this repo.
+`node-setup.sh` (embedded in the ISO) fetches `node-onboarding` from `holo-host/node-onboarding` GitHub Releases at first boot. There is no build-time dependency — the ISO contains no `node-onboarding` binary.
 
 ```
-holo-node-iso  ──fetches at build time──►  holo-host/node-onboarding
-                                            (latest GitHub Release)
+holo-node-iso  ──fetches at first boot──►  holo-host/node-onboarding
+               (via node-setup.sh)          (latest GitHub Release)
 ```
 
-**Versioning:** The ISO always bakes in the latest release of `node-onboarding` at the time the ISO is built. There is no explicit version pin. If you want reproducible builds, pin to a specific release tag by modifying `build.sh`:
+After the initial download, `node-onboarding` updates itself automatically by polling GitHub Releases every hour. The ISO is not involved in updates after first boot.
+
+`node-setup.sh` always fetches the latest release of `node-onboarding`. To pin to a specific version, modify the `download_binary` function in `node-setup.sh` within `config/node.bu`:
 
 ```bash
-# Instead of fetching /releases/latest, fetch a specific version:
-RELEASE_JSON=$(curl -sf \
-  "https://api.github.com/repos/${ONBOARDING_REPO}/releases/tags/v5.0.0")
+# Replace /releases/latest with /releases/tags/v5.1.0:
+"https://api.github.com/repos/${ONBOARDING_REPO}/releases/tags/v5.1.0"
 ```
 
-For most purposes, pinning is unnecessary — freshly-provisioned nodes running an older baked-in binary will update to the latest release within 60–90 seconds of first boot.
+For most purposes pinning is unnecessary — a node running an older binary will self-update within ~60 seconds of coming online.
 
 ---
 
 ## Testing a build
 
-### In a VM (recommended for full end-to-end testing)
-
-```bash
-# Build the ISO
-./scripts/build.sh
-
-# Boot in QEMU (requires qemu-kvm)
-qemu-system-x86_64 \
-  -m 4096 \
-  -cpu host \
-  -enable-kvm \
-  -cdrom holo-node-x86_64.iso \
-  -boot d \
-  -nographic \
-  -serial stdio
-```
-
-The console output will show the FCOS boot sequence. Once booted:
-- The HDMI screen simulation will show the setup password and URL in the serial output
-- Open `http://localhost:8080` (you may need to forward port 8080 from the VM)
-
-```bash
-# Port-forward if needed
-qemu-system-x86_64 ... -net user,hostfwd=tcp::8080-:8080
-```
-
-### Checking the Ignition config is valid before building
+### Validate the Butane config without building
 
 ```bash
 butane --strict --check config/node.bu
 ```
 
-This validates syntax and catches obvious errors without running a full build.
-
-### Checking the generated Ignition JSON
+### Inspect the generated Ignition JSON
 
 ```bash
 butane --strict config/node.bu | python3 -m json.tool | less
 ```
 
-Review the `files` section to confirm the binary and scripts are embedded correctly, and the `passwd` and `systemd` sections match your expectations.
+Check the `passwd`, `storage`, and `systemd` sections. Confirm `node-setup.sh` is present under `storage.files`.
+
+### Full end-to-end test in a VM
+
+```bash
+# Create a virtual disk to install to
+qemu-img create -f qcow2 test-disk.img 20G
+
+# Build the ISO
+./scripts/build.sh
+
+# Boot
+qemu-system-x86_64 \
+  -m 4096 \
+  -cpu host \
+  -enable-kvm \
+  -drive file=holo-node-x86_64.iso,format=raw,if=ide,media=cdrom \
+  -drive file=test-disk.img,format=qcow2,if=virtio \
+  -boot d \
+  -nographic \
+  -serial stdio \
+  -net user,hostfwd=tcp::8080-:8080
+```
+
+The ISO auto-installs FCOS to `test-disk.img` and reboots. After reboot, `node-setup.sh` downloads `node-onboarding` and starts the management server. Open `http://localhost:8080` to verify the setup UI.
 
 ---
 
 ## Troubleshooting
 
-### `butane: command not found`
+### `Error: Compressed initramfs is too large`
 
-Install Butane — see [Prerequisites](#prerequisites).
+The Ignition config is too large for the live ISO's 262KB initramfs limit. This happens if you try to embed a binary in `node.bu` via `contents.local`. The correct approach is to keep `node.bu` binary-free and use `node-setup.sh` to download binaries at first boot. Do not add `contents.local` entries pointing to large files.
 
-### `coreos-installer: error: Could not download`
+### The setup page isn't reachable after install
 
-Check your network connection. `coreos-installer` downloads the FCOS base image (~800 MB) from Fedora's CDN. If you're behind a proxy, set `HTTPS_PROXY`.
+1. Confirm the node rebooted from its internal disk (not still running the live ISO)
+2. `systemctl status node-setup.service` — did it complete successfully?
+3. `ls -lh /usr/local/bin/node-onboarding` — was the binary downloaded?
+4. `systemctl status node-onboarding.service` — is it running?
+5. `ip addr` — what is the node's IP?
+6. `firewall-cmd --list-all` — is port 8080 open?
+7. `journalctl -u node-setup.service` and `journalctl -u node-onboarding.service` for full logs
 
-### The ISO boots but the setup page isn't reachable
+### `node-setup.sh` fails to download node-onboarding
 
-1. Check `systemctl status node-onboarding.service` on the node (SSH in using a recovery key, or attach a keyboard).
-2. Confirm the node's IP with `ip addr`.
-3. Check firewall: `firewall-cmd --list-all` — port 8080 should be open.
-4. Check the journal: `journalctl -u node-onboarding.service -f`
+Check `journalctl -u node-setup.service`. Common causes:
+- No internet at first boot (WiFi-only node where AP setup wasn't completed)
+- GitHub API rate limiting (script retries automatically with backoff)
+- Release asset name mismatch — assets must be named exactly `node-onboarding-x86_64` and `node-onboarding-aarch64`
 
-### `node-onboarding` asset not found in GitHub Release
+### WiFi AP form doesn't load
 
-The build script fetches `node-onboarding-x86_64` or `node-onboarding-aarch64` from the latest release of `holo-host/node-onboarding`. If the release exists but the asset is missing, the GitHub Actions workflow in that repo may have failed. Check its Actions tab.
+- Navigate directly to `http://192.168.4.1:8080` — do not use HTTPS
+- Confirm you are connected to the `HoloNode-Setup` WiFi network (password: `holonode`)
+- Check `journalctl -u node-setup.service -f` on the node to see what the script is doing
+- The HTTP server handles `GET /`, `GET /favicon.ico`, and `POST /connect`; all other paths return the form
 
-### The binary in the ISO is outdated
+### GitHub Actions: circle with slash next to "Attach to GitHub Release"
 
-This is fine — the node will update itself within 60–90 seconds of first boot, pulling the latest binary from `holo-host/node-onboarding` releases. If you need a specific version baked in, pin the release tag in `build.sh` (see [Relationship between repos](#relationship-between-this-repo-and-node-onboarding)).
+Expected behaviour. That step only runs on `release` events. On pushes to `main` it is skipped. ISOs are uploaded as workflow artifacts instead. To attach ISOs to a release, create a GitHub Release with a tag.
 
-### Ignition fails to apply on boot
+### coreos-installer takes 3+ minutes in CI
 
-FCOS logs Ignition errors to the serial console and to `/run/ignition.json` after boot. Common causes:
-
-- A file path referenced with `contents.local` in Butane doesn't exist in the `config/` directory at the time `butane` runs. The build script copies the binary to `config/node-onboarding` before running Butane — if this step fails, the Ignition JSON won't contain the binary.
-- A `mode` value is wrong (Butane expects decimal, e.g. `0755` is octal for decimal `493` — Butane handles this correctly if you write `0755` as a YAML integer, but double-check).
-- A user or group referenced in `storage.directories` doesn't exist yet. The `holo` user is created by the `passwd` section, which runs before `storage`, so this should not be an issue with this config.
+The cache is cold. This happens on the first run or after bumping the cache key. The `setup-tools` job saves the cache independently so subsequent runs skip compilation entirely.
