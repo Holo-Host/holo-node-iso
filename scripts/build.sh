@@ -40,17 +40,26 @@ coreos-installer download \
   --stream "$FCOS_STREAM" \
   --architecture "$ARCH" \
   --format iso \
-  --decompress \
-  --output fcos-base.iso
+  --decompress
+
+# coreos-installer names the file automatically, e.g.:
+# fedora-coreos-42.20250301.3.0-live.aarch64.iso
+# Find whatever it downloaded
+FCOS_ISO=$(ls fedora-coreos-*.iso 2>/dev/null | head -1)
+if [ -z "$FCOS_ISO" ]; then
+  echo "ERROR: Could not find downloaded FCOS ISO"
+  exit 1
+fi
+echo "    Downloaded: $FCOS_ISO"
 
 echo "==> Embedding Ignition config into ISO"
 coreos-installer iso customize \
   --dest-ignition ignition.json \
   --output "$OUTPUT" \
-  fcos-base.iso
+  "$FCOS_ISO"
 
 echo "==> Cleaning up"
-rm -f fcos-base.iso ignition.json "${CONFIG_DIR}/node-onboarding"
+rm -f "$FCOS_ISO" ignition.json "${CONFIG_DIR}/node-onboarding"
 
 echo ""
 echo "==> Done! Output: ${OUTPUT}"
