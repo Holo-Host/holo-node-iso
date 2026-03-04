@@ -26,6 +26,7 @@ echo "    Downloaded: $FCOS_ISO"
 echo "==> Embedding Ignition config into ISO"
 coreos-installer iso customize \
     --dest-ignition ignition.json \
+    --dest-device /dev/sda \
     --output "$OUTPUT" \
     "$FCOS_ISO"
 
