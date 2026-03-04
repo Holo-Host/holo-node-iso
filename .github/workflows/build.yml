@@ -31,7 +31,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y curl jq xz-utils
+          sudo apt-get install -y curl jq
 
           # Butane
           curl -L \
@@ -39,12 +39,25 @@ jobs:
             -o /usr/local/bin/butane
           chmod +x /usr/local/bin/butane
 
-          # coreos-installer — download pre-built binary, do NOT use cargo install
-          curl -L \
-            https://github.com/coreos/coreos-installer/releases/latest/download/coreos-installer_x86_64 \
-            -o /usr/local/bin/coreos-installer
-          chmod +x /usr/local/bin/coreos-installer
+      - name: Cache coreos-installer
+        id: cache-coreos-installer
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/coreos-installer
+          key: coreos-installer-v0.25.0
 
+      - name: Install coreos-installer
+        if: steps.cache-coreos-installer.outputs.cache-hit != 'true'
+        run: |
+          cargo install coreos-installer
+          sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
+
+      - name: Copy cached coreos-installer to PATH
+        if: steps.cache-coreos-installer.outputs.cache-hit == 'true'
+        run: sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
+
+      - name: Verify tools
+        run: |
           butane --version
           coreos-installer --version
 
