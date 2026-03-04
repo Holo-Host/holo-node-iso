@@ -32,8 +32,8 @@ holo-host/node-onboarding            holo-host/holo-node-iso
         │  pipeline                            │
         │                                      │
         │  Publishes binaries:                 │  Produces:
-        │  node-onboarding-x86_64             │  holo-node-x86_64.iso
-        │  node-onboarding-aarch64            │  holo-node-aarch64.iso
+        │  node-onboarding-x86_64              │  holo-node-x86_64.iso
+        │  node-onboarding-aarch64             │  holo-node-aarch64.iso
         │                                      │
         │  ◄── downloaded at first boot ───────┤  (node-setup.sh fetches the
         │       by node-setup.sh               │   binary on first boot)
