@@ -41,7 +41,14 @@ fetch_asset "$ONBOARDING_REPO" "node-onboarding-${ARCH}" "${CONFIG_DIR}/node-onb
 
 echo "==> Stripping binary"
 BEFORE=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
-strip "${CONFIG_DIR}/node-onboarding"
+
+if [ "${ARCH}" = "aarch64" ]; then
+    sudo apt-get install -y binutils-aarch64-linux-gnu
+    aarch64-linux-gnu-strip "${CONFIG_DIR}/node-onboarding"
+else
+    strip "${CONFIG_DIR}/node-onboarding"
+fi
+
 AFTER=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
 echo "    Size before strip: ${BEFORE} — after: ${AFTER}"
 
