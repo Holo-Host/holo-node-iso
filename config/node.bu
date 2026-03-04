@@ -41,7 +41,6 @@ storage:
       mode: 0600
       contents:
         inline: |
-          # Holo Sovereign Node — SSH hardening
           PermitRootLogin no
           PasswordAuthentication no
           ChallengeResponseAuthentication no
@@ -51,19 +50,6 @@ storage:
           LoginGraceTime 30
 
     # ── node-setup.sh ──────────────────────────────────────────────────────────
-    # First-boot script. Inlined as bash — no binary, no initramfs size issue.
-    # FCOS ships bash, curl, nmcli, and nc natively.
-    #
-    # Ethernet path: detects internet → downloads node-onboarding → exits.
-    # WiFi path: starts AP (HoloNode-Setup / holonode) → serves a proper
-    #   HTTP server loop via nc → collects SSID+password → connects →
-    #   downloads node-onboarding → exits.
-    #
-    # The HTTP server loop handles GET /, GET /favicon.ico, and POST /connect
-    # correctly, so normal browser behaviour (favicon fetches, retries) works.
-    #
-    # Runs once. ConditionPathExists=!/usr/local/bin/node-onboarding in the
-    # service unit prevents it ever running again.
     - path: /usr/local/bin/node-setup.sh
       mode: 0755
       contents:
@@ -77,8 +63,33 @@ storage:
           AP_PASSWORD="holonode"
           LISTEN_PORT="8080"
           LOG="[node-setup]"
+          ISSUE_FILE="/run/issue.d/50-node-setup.issue"
 
-          # ── helpers ──────────────────────────────────────────────────────────
+          mkdir -p /run/issue.d
+
+          # ── error trap ──────────────────────────────────────────────────────
+          # Catches any unhandled error and writes full context to the login
+          # prompt so operators see exactly what failed without needing SSH.
+          trap_error() {
+            local exit_code=$?
+            local line=$1
+            local cmd=$2
+            {
+              printf '\n\033[1;31m╔══════════════════════════════════════════════╗\033[0m\n'
+              printf '\033[1;31m║        HOLO NODE SETUP FAILED                ║\033[0m\n'
+              printf '\033[1;31m╚══════════════════════════════════════════════╝\033[0m\n'
+              printf '\033[1;37mFailed at line:\033[0m %s\n' "$line"
+              printf '\033[1;37mCommand:       \033[0m %s\n' "$cmd"
+              printf '\033[1;37mExit code:     \033[0m %s\n' "$exit_code"
+              printf '\n\033[1;37mService log (last 20 lines):\033[0m\n'
+              journalctl -u node-setup.service -n 20 --no-pager 2>/dev/null || true
+              printf '\n\033[0;33mTo diagnose: journalctl -u node-setup.service --no-pager\033[0m\n'
+              printf '\033[0;33mTo retry:    systemctl restart node-setup.service\033[0m\n\n'
+            } > "$ISSUE_FILE"
+          }
+          trap 'trap_error $LINENO "$BASH_COMMAND"' ERR
+
+          # ── helpers ─────────────────────────────────────────────────────────
 
           log() { echo "$LOG $*"; }
 
@@ -105,13 +116,6 @@ storage:
             url_decode "$val"
           }
 
-          send_response() {
-            # send_response <fd> <status> <content-type> <body>
-            local fd="$1" status="$2" ct="$3" body="$4"
-            printf "HTTP/1.1 %s\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
-              "$status" "$ct" "${#body}" "$body" >&"$fd"
-          }
-
           download_binary() {
             log "Fetching latest release info..."
             local release_json
@@ -132,7 +136,7 @@ storage:
 
             if [ -z "$url" ]; then
               log "ERROR: Could not find asset ${asset_name} in release"
-              return 1
+              exit 1
             fi
 
             log "Downloading from: $url"
@@ -142,7 +146,17 @@ storage:
             log "node-onboarding installed successfully"
           }
 
-          # ── HTML pages ────────────────────────────────────────────────────────
+          setup_complete() {
+            {
+              printf '\n\033[1;32m╔══════════════════════════════════════════════╗\033[0m\n'
+              printf '\033[1;32m║        HOLO NODE SETUP COMPLETE              ║\033[0m\n'
+              printf '\033[1;32m╚══════════════════════════════════════════════╝\033[0m\n'
+              printf '\033[1;37mnode-onboarding is installed and starting.\033[0m\n'
+              printf '\033[1;37mOpen \033[0;36mhttp://<node-ip>:8080\033[1;37m to complete setup.\033[0m\n\n'
+            } > "$ISSUE_FILE"
+          }
+
+          # ── HTML pages ───────────────────────────────────────────────────────
 
           read -r -d '' FORM_HTML << 'HTMLEOF' || true
           <!DOCTYPE html>
@@ -230,38 +244,25 @@ storage:
           </div></body></html>
           HTMLEOF
 
-          # ── HTTP server loop ──────────────────────────────────────────────────
-          # Handles one connection per nc invocation, loops for the next.
-          # Returns the POST body via stdout if a form was submitted,
-          # otherwise returns empty string.
+          # ── HTTP server loop ─────────────────────────────────────────────────
 
-          serve_http_loop() {
+          serve_wifi_ui() {
             local wifi_iface="$1"
 
             while true; do
-              # Each iteration handles exactly one HTTP connection
-              local raw_request=""
               local post_body=""
 
-              # Use a temp FIFO so we can both read the request and write the response
-              local fifo
-              fifo=$(mktemp -u)
-              mkfifo "$fifo"
-
-              # Read request, write response, capture any POST body
               post_body=$(
                 {
                   local request_line=""
                   local content_length=0
                   local method="" path=""
 
-                  # Read request line
                   IFS= read -r request_line
                   request_line="${request_line%$'\r'}"
                   method=$(echo "$request_line" | awk '{print $1}')
                   path=$(echo "$request_line"   | awk '{print $2}')
 
-                  # Read headers
                   while IFS= read -r hdr; do
                     hdr="${hdr%$'\r'}"
                     [ -z "$hdr" ] && break
@@ -271,22 +272,18 @@ storage:
                     fi
                   done
 
-                  # Read POST body if present
                   local body=""
                   if [ "$method" = "POST" ] && [ "${content_length:-0}" -gt 0 ]; then
                     IFS= read -r -d '' -n "$content_length" body 2>/dev/null || true
                   fi
 
-                  # Route the request
                   case "$path" in
                     /favicon.ico)
                       printf "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                       ;;
                     /connect)
-                      # Send connecting page immediately before we drop the AP
                       printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
                         "${#CONNECTING_HTML}" "$CONNECTING_HTML"
-                      # Signal the outer loop with the form body
                       echo "POSTBODY:${body}"
                       ;;
                     *)
@@ -297,9 +294,6 @@ storage:
                 } | nc -l -p "$LISTEN_PORT" -q 2 2>/dev/null | grep "^POSTBODY:" | head -1 || true
               )
 
-              rm -f "$fifo"
-
-              # If we got a form submission, attempt WiFi connection
               if [ -n "$post_body" ]; then
                 local body="${post_body#POSTBODY:}"
                 local ssid password
@@ -310,7 +304,6 @@ storage:
 
                 log "Attempting to connect to '${ssid}'"
 
-                # Drop AP and connect
                 nmcli device disconnect "$wifi_iface" 2>/dev/null || true
                 sleep 2
                 nmcli device wifi connect "$ssid" \
@@ -333,33 +326,28 @@ storage:
             done
           }
 
-          # ── main ──────────────────────────────────────────────────────────────
+          # ── main ─────────────────────────────────────────────────────────────
 
           log "Starting Holo Node first-boot setup"
 
-          # Wait for NetworkManager to be ready (up to 30s)
+          # Wait for NetworkManager (up to 30s)
           for i in $(seq 1 30); do
             nmcli general status &>/dev/null && break
             sleep 1
           done
 
-          # Fast path: ethernet / existing connection already has internet
+          # Fast path: internet already reachable
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
-            mkdir -p /run/issue.d
-            printf '\n\033[1;32m[Holo Node]\033[0m node-setup: OK — node-onboarding installed\n\n' \
-            > /run/issue.d/50-node-setup.issue
+            setup_complete
             exit 0
           fi
 
           # Slow path: WiFi-only node
           WIFI_IFACE=$(detect_wifi_iface)
           if [ -z "$WIFI_IFACE" ]; then
-            log "ERROR: No internet and no WiFi interface found. Cannot proceed."
-            mkdir -p /run/issue.d
-            printf '\n\033[1;31m[Holo Node]\033[0m node-setup FAILED — check: journalctl -u node-setup.service\n\n' \
-            > /run/issue.d/50-node-setup.issue
+            log "ERROR: No internet and no WiFi interface found"
             exit 1
           fi
 
@@ -367,23 +355,15 @@ storage:
           nmcli device wifi hotspot \
             ifname "$WIFI_IFACE" \
             ssid "$AP_SSID" \
-            password "$AP_PASSWORD" || {
-            log "ERROR: Failed to start WiFi hotspot"
-            mkdir -p /run/issue.d
-            printf '\n\033[1;31m[Holo Node]\033[0m node-setup FAILED — check: journalctl -u node-setup.service\n\n' \
-            > /run/issue.d/50-node-setup.issue
-            exit 1
-          }
+            password "$AP_PASSWORD"
           sleep 3
 
           log "AP running. Serving setup UI on port ${LISTEN_PORT}"
-          serve_http_loop "$WIFI_IFACE"
+          serve_wifi_ui "$WIFI_IFACE"
 
           log "WiFi configured — downloading node-onboarding"
           download_binary
-          mkdir -p /run/issue.d
-          printf '\n\033[1;32m[Holo Node]\033[0m node-setup: OK — node-onboarding installed\n\n' \
-          > /run/issue.d/50-node-setup.issue
+          setup_complete
           exit 0
 
 # ── systemd units ─────────────────────────────────────────────────────────────
@@ -399,7 +379,6 @@ systemd:
         Wants=NetworkManager.service
         ConditionPathExists=!/usr/local/bin/node-onboarding
         Before=node-onboarding.service
-        OnFailure=node-setup-report.service
 
         [Service]
         Type=oneshot
@@ -454,23 +433,6 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
-
-    # ── node-update-report.service ───────────────────────────────────────────────
-    - name: node-update-report.service
-      contents: |
-        [Unit]
-        Description=Report node-setup failure to console
-        DefaultDependencies=no
-
-        [Service]
-        Type=oneshot
-        ExecStart=/bin/bash -c '\
-        mkdir -p /run/issue.d && \
-        printf "\n\033[1;31m[Holo Node] node-setup.service FAILED\033[0m\n" \
-        > /run/issue.d/50-node-setup.issue && \
-        journalctl -u node-setup.service -n 30 --no-pager \
-        >> /run/issue.d/50-node-setup.issue && \
-        printf "\n" >> /run/issue.d/50-node-setup.issue'
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
     - name: podman-auto-update.timer
