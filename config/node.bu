@@ -2,9 +2,6 @@ variant: fcos
 version: 1.5.0
 
 # ── Users ─────────────────────────────────────────────────────────────────────
-# The `holo` user is the only SSH-accessible user on the node.
-# Root login is disabled. The node-onboarding server manages authorized_keys
-# for this user via the /manage panel — no keys are baked in here.
 passwd:
   users:
     - name: holo
@@ -12,16 +9,10 @@ passwd:
       home_dir: /home/holo
       groups:
         - systemd-journal
-      # No ssh_authorized_keys here — the operator adds them via the UI.
-      # If you want a fallback key for recovery, add it here:
-      # ssh_authorized_keys:
-      #   - "ssh-ed25519 AAAA... recovery key"
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 storage:
   directories:
-    # /home/holo/.ssh must exist with correct permissions before the
-    # node-onboarding server tries to write authorized_keys into it.
     - path: /home/holo/.ssh
       user:
         name: holo
@@ -29,30 +20,23 @@ storage:
         name: holo
       mode: 0700
 
-    # State directory for the onboarding server.
     - path: /etc/node-onboarding
       mode: 0700
 
-    # ZeroClaw config directory (created by onboarding if agent is enabled,
-    # but having it here avoids a permission issue if the directory doesn't exist).
     - path: /etc/zeroclaw
       mode: 0700
 
-    # Quadlet directory — Podman reads this to create systemd units.
     - path: /etc/containers/systemd
       mode: 0755
 
-    # EdgeNode persistent data.
     - path: /var/lib/edgenode
       mode: 0755
 
-    # ZeroClaw workspace — the agent reads/writes mode_switch.txt here.
     - path: /var/lib/zeroclaw/workspace
       mode: 0755
 
   files:
     # ── SSH hardening ──────────────────────────────────────────────────────────
-    # Drop-in that overrides the FCOS default sshd config.
     - path: /etc/ssh/sshd_config.d/90-holo.conf
       mode: 0600
       contents:
@@ -66,28 +50,51 @@ storage:
           MaxAuthTries 3
           LoginGraceTime 30
 
-    # ── node-onboarding binary ─────────────────────────────────────────────────
-    # build.sh fetches and strips the binary before running Butane.
-    # Butane embeds it base64-encoded inside the Ignition JSON.
-    # strip reduces the musl static binary from ~650KB to ~200KB,
-    # which fits within the coreos-installer initramfs 262KB limit.
-    - path: /usr/local/bin/node-onboarding
+    # ── node-ap-setup binary ───────────────────────────────────────────────────
+    # Tiny first-boot stub. Fits within the 262KB initramfs limit when stripped.
+    # On first boot either downloads node-onboarding directly (ethernet) or
+    # starts a WiFi AP to collect credentials first (WiFi-only nodes).
+    # Never runs again once node-onboarding exists on disk.
+    - path: /usr/local/bin/node-ap-setup
       mode: 0755
       contents:
-        local: node-onboarding   # path relative to --files-dir (config/)
+        local: node-ap-setup   # path relative to --files-dir (config/)
 
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
   units:
+    # ── node-ap-setup.service ──────────────────────────────────────────────────
+    - name: node-ap-setup.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Holo Node — first-boot network setup and binary install
+        After=network.target NetworkManager.service
+        Wants=NetworkManager.service
+        ConditionPathExists=!/usr/local/bin/node-onboarding
+        Before=node-onboarding.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/local/bin/node-ap-setup
+        StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=node-ap-setup
+        TimeoutStartSec=600
+
+        [Install]
+        WantedBy=multi-user.target
+
     # ── node-onboarding.service ────────────────────────────────────────────────
-    # Permanent service — runs forever, not just during onboarding.
     - name: node-onboarding.service
       enabled: true
       contents: |
         [Unit]
         Description=Holo Node Onboarding & Management Server
-        After=network-online.target
+        After=network-online.target node-ap-setup.service
         Wants=network-online.target
+        Requires=node-ap-setup.service
 
         [Service]
         Type=simple
@@ -103,9 +110,6 @@ systemd:
         WantedBy=multi-user.target
 
     # ── install-zeroclaw.service ───────────────────────────────────────────────
-    # Runs on first boot only if the operator enabled the AI agent.
-    # node-onboarding manages whether this runs by creating/removing its
-    # enablement symlink. You don't need to enable it here.
     - name: install-zeroclaw.service
       contents: |
         [Unit]
@@ -125,6 +129,5 @@ systemd:
         WantedBy=multi-user.target
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
-    # Automatically updates container images daily via Podman.
     - name: podman-auto-update.timer
       enabled: true

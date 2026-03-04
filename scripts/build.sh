@@ -3,7 +3,7 @@ set -euo pipefail
 
 ARCH="${ARCH:-x86_64}"
 FCOS_STREAM="stable"
-ONBOARDING_REPO="Holo-Host/node-onboarding"
+AP_SETUP_REPO="Holo-Host/node-ap-setup"
 OUTPUT="holo-node-${ARCH}.iso"
 CONFIG_DIR="$(cd "$(dirname "$0")/../config" && pwd)"
 
@@ -36,20 +36,18 @@ fetch_asset() {
     chmod +x "$dest"
 }
 
-echo "==> Fetching node-onboarding binary for ${ARCH}"
-fetch_asset "$ONBOARDING_REPO" "node-onboarding-${ARCH}" "${CONFIG_DIR}/node-onboarding"
+echo "==> Fetching node-ap-setup binary for ${ARCH}"
+fetch_asset "$AP_SETUP_REPO" "node-ap-setup-${ARCH}" "${CONFIG_DIR}/node-ap-setup"
 
-echo "==> Stripping binary"
-BEFORE=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
-
+echo "==> Stripping binary to minimise initramfs size"
+BEFORE=$(ls -lh "${CONFIG_DIR}/node-ap-setup" | awk '{print $5}')
 if [ "${ARCH}" = "aarch64" ]; then
-    sudo apt-get install -y binutils-aarch64-linux-gnu
-    aarch64-linux-gnu-strip "${CONFIG_DIR}/node-onboarding"
+    sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu -q
+    aarch64-linux-gnu-strip "${CONFIG_DIR}/node-ap-setup"
 else
-    strip "${CONFIG_DIR}/node-onboarding"
+    strip "${CONFIG_DIR}/node-ap-setup"
 fi
-
-AFTER=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
+AFTER=$(ls -lh "${CONFIG_DIR}/node-ap-setup" | awk '{print $5}')
 echo "    Size before strip: ${BEFORE} — after: ${AFTER}"
 
 echo "==> Compiling Butane config"
@@ -76,7 +74,7 @@ coreos-installer iso customize \
     "$FCOS_ISO"
 
 echo "==> Cleaning up"
-rm -f "$FCOS_ISO" ignition.json "${CONFIG_DIR}/node-onboarding"
+rm -f "$FCOS_ISO" ignition.json "${CONFIG_DIR}/node-ap-setup"
 
 echo ""
 echo "==> Done! Output: ${OUTPUT}"
