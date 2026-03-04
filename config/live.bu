@@ -8,29 +8,28 @@ storage:
       contents:
         inline: |
           #!/usr/bin/env bash
-          #!/usr/bin/env bash
-        set -euo pipefail
+          set -euo pipefail
 
-        for dev in /sys/block/*; do
-          name=$(basename "$dev")
-          # Skip loops, sr (optical), zram
-          [[ "$name" =~ ^(loop|sr|zram) ]] && continue
-          # Skip NVMe controller namespaces (nvme0c0n1 etc) — not real block devices
-          [[ "$name" =~ nvme[0-9]+c[0-9]+ ]] && continue
-          # Skip removable devices (USB sticks)
-          removable=$(cat "$dev/removable" 2>/dev/null || echo 0)
-          [ "$removable" = "1" ] && continue
-          # Confirm it actually exists as a block device in /dev
-          [ -b "/dev/${name}" ] || continue
-          # Found it
-          DISK="/dev/${name}"
-          echo "Detected install target: $DISK"
-          echo "dest-device: $DISK" >> /etc/coreos/installer.d/0001-disk.yaml
-          exit 0
-        done
+          for dev in /sys/block/*; do
+            name=$(basename "$dev")
+            # Skip loops, sr (optical), zram
+            [[ "$name" =~ ^(loop|sr|zram) ]] && continue
+            # Skip NVMe controller namespaces (nvme0c0n1 etc) — not real block devices
+            [[ "$name" =~ nvme[0-9]+c[0-9]+ ]] && continue
+            # Skip removable devices (USB sticks)
+            removable=$(cat "$dev/removable" 2>/dev/null || echo 0)
+            [ "$removable" = "1" ] && continue
+            # Confirm it actually exists as a block device in /dev
+            [ -b "/dev/${name}" ] || continue
+            # Found it
+            DISK="/dev/${name}"
+            echo "Detected install target: $DISK"
+            echo "dest-device: $DISK" >> /etc/coreos/installer.d/0001-disk.yaml
+            exit 0
+          done
 
-        echo "ERROR: No suitable install disk found"
-        exit 1
+          echo "ERROR: No suitable install disk found"
+          exit 1
 
 systemd:
   units:
