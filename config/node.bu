@@ -50,21 +50,260 @@ storage:
           MaxAuthTries 3
           LoginGraceTime 30
 
-    # ── node-ap-setup binary ───────────────────────────────────────────────────
-    # Tiny first-boot stub. Fits within the 262KB initramfs limit when stripped.
-    # On first boot either downloads node-onboarding directly (ethernet) or
-    # starts a WiFi AP to collect credentials first (WiFi-only nodes).
-    # Never runs again once node-onboarding exists on disk.
-    - path: /usr/local/bin/node-ap-setup
+    # ── node-setup.sh ──────────────────────────────────────────────────────────
+    # First-boot script: gets node-onboarding onto disk.
+    # Inlined as a shell script so there is no binary to embed — no initramfs
+    # size issue. FCOS ships bash, curl, nmcli, and nc natively.
+    #
+    # Flow:
+    #   1. Wait for NetworkManager to be ready.
+    #   2. If internet reachable → download node-onboarding and exit.
+    #   3. If no internet → start a WiFi AP (HoloNode-Setup / holonode),
+    #      serve a minimal HTML form via nc, collect SSID+password,
+    #      connect via nmcli, then download node-onboarding and exit.
+    #
+    # Runs once. ConditionPathExists=!/usr/local/bin/node-onboarding in the
+    # service unit prevents it ever running again.
+    - path: /usr/local/bin/node-setup.sh
       mode: 0755
       contents:
-        local: node-ap-setup   # path relative to --files-dir (config/)
+        inline: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ONBOARDING_REPO="Holo-Host/node-onboarding"
+          ONBOARDING_BIN="/usr/local/bin/node-onboarding"
+          AP_SSID="HoloNode-Setup"
+          AP_PASSWORD="holonode"
+          AP_IP="192.168.4.1"
+          LISTEN_PORT="8080"
+          LOG="[node-setup]"
+
+          # ── helpers ────────────────────────────────────────────────────────
+
+          log() { echo "$LOG $*" | tee /dev/kmsg 2>/dev/null || true; }
+
+          has_internet() {
+            curl -fsS --max-time 5 --connect-timeout 5 \
+              -o /dev/null https://api.github.com 2>/dev/null
+          }
+
+          detect_wifi_iface() {
+            for iface in /sys/class/net/*/wireless; do
+              [ -d "$iface" ] && basename "$(dirname "$iface")" && return
+            done
+            echo ""
+          }
+
+          url_decode() {
+            local encoded="${1//+/ }"
+            printf '%b' "${encoded//%/\\x}"
+          }
+
+          download_binary() {
+            log "Fetching latest release info..."
+            local release_json
+            release_json=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: holo-node-setup" \
+              "https://api.github.com/repos/${ONBOARDING_REPO}/releases/latest")
+
+            local arch
+            arch=$(uname -m)
+            [ "$arch" = "aarch64" ] || arch="x86_64"
+            local asset_name="node-onboarding-${arch}"
+
+            local url
+            url=$(echo "$release_json" | \
+              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+              grep -o 'https://[^"]*')
+
+            if [ -z "$url" ]; then
+              log "ERROR: Could not find asset ${asset_name} in release"
+              return 1
+            fi
+
+            log "Downloading from: $url"
+            curl -fsSL "$url" -o "${ONBOARDING_BIN}.tmp"
+            chmod +x "${ONBOARDING_BIN}.tmp"
+            mv "${ONBOARDING_BIN}.tmp" "$ONBOARDING_BIN"
+            log "node-onboarding installed successfully"
+          }
+
+          serve_one_request() {
+            # Serve a single HTTP request via nc, return the POST body if it
+            # was a form submission, or empty string for GET requests.
+            local response_html="$1"
+            local body=""
+
+            local raw
+            raw=$(echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${#response_html}\r\nConnection: close\r\n\r\n${response_html}" \
+              | nc -l -p "$LISTEN_PORT" -q 1 2>/dev/null || true)
+
+            # Extract POST body (after the blank line)
+            if echo "$raw" | grep -q "^POST"; then
+              body=$(echo "$raw" | awk '/^\r?$/{found=1; next} found{print}' | tr -d '\r')
+            fi
+            echo "$body"
+          }
+
+          parse_field() {
+            # parse_field "ssid" "ssid=MyNet&password=abc"
+            local field="$1"
+            local body="$2"
+            local val
+            val=$(echo "$body" | grep -o "${field}=[^&]*" | cut -d= -f2-)
+            url_decode "$val"
+          }
+
+          # ── HTML pages ─────────────────────────────────────────────────────
+
+          FORM_HTML='<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Holo Node Setup</title>
+          <style>
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+            background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+            display:flex;align-items:center;justify-content:center;padding:20px}
+          .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+            padding:40px;width:100%;max-width:420px}
+          h1{font-size:22px;font-weight:600;color:#a78bfa;text-align:center;margin-bottom:8px}
+          .sub{text-align:center;color:#666680;font-size:13px;margin-bottom:28px}
+          .info{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
+            padding:14px 16px;font-size:13px;color:#9999bb;margin-bottom:28px;line-height:1.5}
+          label{display:block;font-size:13px;font-weight:500;color:#9999bb;
+            margin-bottom:6px;margin-top:20px}
+          label:first-of-type{margin-top:0}
+          input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;
+            border-radius:8px;padding:10px 14px;color:#e8e8f0;font-size:15px;outline:none}
+          button{width:100%;background:#7c3aed;color:white;border:none;
+            border-radius:8px;padding:12px;font-size:15px;font-weight:600;
+            cursor:pointer;margin-top:28px}
+          </style></head><body><div class="card">
+          <h1>Holo Node Setup</h1>
+          <p class="sub">WiFi Configuration</p>
+          <div class="info">Your node is in setup mode. You are connected to
+          <strong>HoloNode-Setup</strong>. Enter your home WiFi credentials to
+          connect your node to the internet.</div>
+          <form method="POST" action="/connect">
+          <label for="ssid">WiFi Network Name (SSID)</label>
+          <input type="text" id="ssid" name="ssid" placeholder="Your WiFi network" required>
+          <label for="password">WiFi Password</label>
+          <input type="password" id="password" name="password" placeholder="Your WiFi password">
+          <button type="submit">Connect &amp; Continue</button>
+          </form></div></body></html>'
+
+          CONNECTING_HTML='<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Holo Node — Connecting</title>
+          <style>
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+            background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+            display:flex;align-items:center;justify-content:center;padding:20px}
+          .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+            padding:40px;width:100%;max-width:420px;text-align:center}
+          h1{font-size:20px;color:#a78bfa;margin-bottom:12px}
+          p{color:#666680;font-size:14px;line-height:1.6}
+          .spinner{width:40px;height:40px;border:3px solid #2a2a3a;
+            border-top-color:#7c3aed;border-radius:50%;
+            animation:spin .8s linear infinite;margin:28px auto}
+          @keyframes spin{to{transform:rotate(360deg)}}
+          .note{margin-top:24px;background:#1a1a2e;border:1px solid #2a2a4a;
+            border-radius:10px;padding:14px 16px;font-size:13px;
+            color:#9999bb;line-height:1.5;text-align:left}
+          </style></head><body><div class="card">
+          <h1>Connecting...</h1>
+          <div class="spinner"></div>
+          <p>Connecting your node to your WiFi network.<br>This may take up to 30 seconds.</p>
+          <div class="note">Your device will disconnect from HoloNode-Setup.
+          Once the node is online, find its IP address on your router and open
+          <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.</div>
+          </div></body></html>'
+
+          # ── main ───────────────────────────────────────────────────────────
+
+          log "Starting node setup"
+
+          # Wait for NetworkManager
+          for i in $(seq 1 30); do
+            nmcli general status &>/dev/null && break
+            sleep 1
+          done
+
+          # Fast path: ethernet / existing connection has internet
+          if has_internet; then
+            log "Internet available — downloading node-onboarding"
+            download_binary
+            exit 0
+          fi
+
+          # Slow path: WiFi-only node
+          WIFI_IFACE=$(detect_wifi_iface)
+          if [ -z "$WIFI_IFACE" ]; then
+            log "ERROR: No internet and no WiFi interface found. Cannot proceed."
+            exit 1
+          fi
+
+          log "No internet detected. Starting AP on ${WIFI_IFACE} (SSID: ${AP_SSID})"
+          nmcli device wifi hotspot \
+            ifname "$WIFI_IFACE" \
+            ssid "$AP_SSID" \
+            password "$AP_PASSWORD" || {
+            log "ERROR: Failed to start WiFi hotspot"
+            exit 1
+          }
+          sleep 3
+
+          log "AP running. Serving setup UI on http://${AP_IP}:${LISTEN_PORT}"
+
+          while true; do
+            body=$(serve_one_request "$FORM_HTML")
+
+            if echo "$body" | grep -q "ssid="; then
+              SSID=$(parse_field "ssid" "$body")
+              PASSWORD=$(parse_field "password" "$body")
+
+              if [ -z "$SSID" ]; then
+                log "Empty SSID submitted, retrying"
+                continue
+              fi
+
+              log "Attempting to connect to '${SSID}'"
+
+              # Send the connecting page before dropping the AP
+              serve_one_request "$CONNECTING_HTML" &>/dev/null &
+
+              # Drop AP and connect to target network
+              nmcli device disconnect "$WIFI_IFACE" 2>/dev/null || true
+              sleep 2
+
+              nmcli device wifi connect "$SSID" \
+                password "$PASSWORD" \
+                ifname "$WIFI_IFACE" 2>/dev/null || true
+              sleep 8
+
+              if has_internet; then
+                log "Connected to '${SSID}' and internet confirmed"
+                download_binary
+                exit 0
+              else
+                log "Connection to '${SSID}' failed, restarting AP"
+                nmcli device wifi hotspot \
+                  ifname "$WIFI_IFACE" \
+                  ssid "$AP_SSID" \
+                  password "$AP_PASSWORD" 2>/dev/null || true
+                sleep 3
+              fi
+            fi
+          done
 
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
   units:
-    # ── node-ap-setup.service ──────────────────────────────────────────────────
-    - name: node-ap-setup.service
+    # ── node-setup.service ─────────────────────────────────────────────────────
+    - name: node-setup.service
       enabled: true
       contents: |
         [Unit]
@@ -77,10 +316,10 @@ systemd:
         [Service]
         Type=oneshot
         RemainAfterExit=yes
-        ExecStart=/usr/local/bin/node-ap-setup
+        ExecStart=/usr/local/bin/node-setup.sh
         StandardOutput=journal
         StandardError=journal
-        SyslogIdentifier=node-ap-setup
+        SyslogIdentifier=node-setup
         TimeoutStartSec=600
 
         [Install]
@@ -92,9 +331,9 @@ systemd:
       contents: |
         [Unit]
         Description=Holo Node Onboarding & Management Server
-        After=network-online.target node-ap-setup.service
+        After=network-online.target node-setup.service
         Wants=network-online.target
-        Requires=node-ap-setup.service
+        Requires=node-setup.service
 
         [Service]
         Type=simple
