@@ -66,55 +66,28 @@ storage:
           MaxAuthTries 3
           LoginGraceTime 30
 
-    # ── ap-setup binary ────────────────────────────────────────────────────────
-    # Small enough to embed in the initramfs. Handles WiFi config and downloads
-    # the full node-onboarding binary on first boot.
-    - path: /usr/local/bin/node-ap-setup
+    # ── node-onboarding binary ─────────────────────────────────────────────────
+    # build.sh fetches and strips the binary before running Butane.
+    # Butane embeds it base64-encoded inside the Ignition JSON.
+    # strip reduces the musl static binary from ~650KB to ~200KB,
+    # which fits within the coreos-installer initramfs 262KB limit.
+    - path: /usr/local/bin/node-onboarding
       mode: 0755
       contents:
-        local: node-ap-setup   # build.sh copies the arch binary here before butane runs
+        local: node-onboarding   # path relative to --files-dir (config/)
 
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
   units:
-    # ── node-ap-setup.service ──────────────────────────────────────────────────
-    # Runs once on first boot of the installed system.
-    # If ethernet/internet is available: downloads node-onboarding and exits.
-    # If no internet: starts a WiFi AP, serves a form, connects, then downloads.
-    # Never runs again because node-onboarding binary will exist after first run.
-    - name: node-ap-setup.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Holo Node AP Setup (first-boot WiFi configuration)
-        After=network.target NetworkManager.service
-        Wants=NetworkManager.service
-        ConditionPathExists=!/usr/local/bin/node-onboarding
-        Before=node-onboarding.service
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=yes
-        ExecStart=/usr/local/bin/node-ap-setup
-        StandardOutput=journal
-        StandardError=journal
-        SyslogIdentifier=node-ap-setup
-        # Generous timeout — WiFi setup is interactive and may take time
-        TimeoutStartSec=600
-
-        [Install]
-        WantedBy=multi-user.target
-
     # ── node-onboarding.service ────────────────────────────────────────────────
-    # Does not start until node-ap-setup has finished (and downloaded the binary).
+    # Permanent service — runs forever, not just during onboarding.
     - name: node-onboarding.service
       enabled: true
       contents: |
         [Unit]
         Description=Holo Node Onboarding & Management Server
-        After=network-online.target node-ap-setup.service
+        After=network-online.target
         Wants=network-online.target
-        Requires=node-ap-setup.service
 
         [Service]
         Type=simple

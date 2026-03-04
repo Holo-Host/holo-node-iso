@@ -4,7 +4,6 @@ set -euo pipefail
 ARCH="${ARCH:-x86_64}"
 FCOS_STREAM="stable"
 ONBOARDING_REPO="Holo-Host/node-onboarding"
-AP_SETUP_REPO="Holo-Host/node-ap-setup"
 OUTPUT="holo-node-${ARCH}.iso"
 CONFIG_DIR="$(cd "$(dirname "$0")/../config" && pwd)"
 
@@ -37,9 +36,14 @@ fetch_asset() {
     chmod +x "$dest"
 }
 
-echo "==> Fetching binaries for ${ARCH}"
+echo "==> Fetching node-onboarding binary for ${ARCH}"
 fetch_asset "$ONBOARDING_REPO" "node-onboarding-${ARCH}" "${CONFIG_DIR}/node-onboarding"
-fetch_asset "$AP_SETUP_REPO"   "node-ap-setup-${ARCH}"   "${CONFIG_DIR}/node-ap-setup"
+
+echo "==> Stripping binary"
+BEFORE=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
+strip "${CONFIG_DIR}/node-onboarding"
+AFTER=$(ls -lh "${CONFIG_DIR}/node-onboarding" | awk '{print $5}')
+echo "    Size before strip: ${BEFORE} — after: ${AFTER}"
 
 echo "==> Compiling Butane config"
 butane --strict --files-dir "${CONFIG_DIR}" "${CONFIG_DIR}/node.bu" > ignition.json
@@ -65,9 +69,7 @@ coreos-installer iso customize \
     "$FCOS_ISO"
 
 echo "==> Cleaning up"
-rm -f "$FCOS_ISO" ignition.json \
-    "${CONFIG_DIR}/node-onboarding" \
-    "${CONFIG_DIR}/node-ap-setup"
+rm -f "$FCOS_ISO" ignition.json "${CONFIG_DIR}/node-onboarding"
 
 echo ""
 echo "==> Done! Output: ${OUTPUT}"
