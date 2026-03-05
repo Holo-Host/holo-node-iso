@@ -190,11 +190,15 @@ storage:
 
           # Retry up to 10 times with 3s gaps (30s total) before giving up.
           # Guards against the service starting before routing is established.
+          # NOTE: curl is wrapped in an explicit `if` so that set -e does not
+          # abort the retry loop on the first failed attempt.
           has_internet() {
             local i
             for i in $(seq 1 10); do
-              curl -fsS --max-time 5 --connect-timeout 5 \
-                -o /dev/null https://api.github.com 2>/dev/null && return 0
+              if curl -fsS --max-time 5 --connect-timeout 5 \
+                  -o /dev/null https://api.github.com 2>/dev/null; then
+                return 0
+              fi
               sleep 3
             done
             return 1
