@@ -35,6 +35,9 @@ storage:
     - path: /var/lib/zeroclaw/workspace
       mode: 0755
 
+    - path: /usr/local/share/holo-node
+      mode: 0755
+
   files:
     # ── SSH hardening ──────────────────────────────────────────────────────────
     - path: /etc/ssh/sshd_config.d/90-holo.conf
@@ -48,6 +51,98 @@ storage:
           AllowUsers holo
           MaxAuthTries 3
           LoginGraceTime 30
+
+    # ── WiFi setup form HTML ───────────────────────────────────────────────────
+    - path: /usr/local/share/holo-node/wifi-form.html
+      mode: 0644
+      contents:
+        inline: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Holo Node Setup</title>
+            <style>
+              *{box-sizing:border-box;margin:0;padding:0}
+              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+                display:flex;align-items:center;justify-content:center;padding:20px}
+              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+                padding:40px;width:100%;max-width:420px}
+              h1{font-size:22px;font-weight:600;color:#a78bfa;
+                text-align:center;margin-bottom:8px}
+              .sub{text-align:center;color:#666680;font-size:13px;margin-bottom:28px}
+              .info{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
+                padding:14px 16px;font-size:13px;color:#9999bb;
+                margin-bottom:28px;line-height:1.5}
+              label{display:block;font-size:13px;font-weight:500;color:#9999bb;
+                margin-bottom:6px;margin-top:20px}
+              label:first-of-type{margin-top:0}
+              input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;
+                border-radius:8px;padding:10px 14px;color:#e8e8f0;
+                font-size:15px;outline:none}
+              button{width:100%;background:#7c3aed;color:white;border:none;
+                border-radius:8px;padding:12px;font-size:15px;
+                font-weight:600;cursor:pointer;margin-top:28px}
+            </style>
+          </head>
+          <body><div class="card">
+            <h1>Holo Node Setup</h1>
+            <p class="sub">WiFi Configuration</p>
+            <div class="info">Your node is in setup mode. You are connected to
+            <strong>HoloNode-Setup</strong>. Enter your home WiFi credentials
+            to connect your node to the internet.</div>
+            <form method="POST" action="/connect">
+              <label for="ssid">WiFi Network Name (SSID)</label>
+              <input type="text" id="ssid" name="ssid"
+                placeholder="Your WiFi network" autocomplete="off" required>
+              <label for="password">WiFi Password</label>
+              <input type="password" id="password" name="password"
+                placeholder="Your WiFi password" autocomplete="off">
+              <button type="submit">Connect &amp; Continue</button>
+            </form>
+          </div></body></html>
+
+    # ── WiFi connecting page HTML ──────────────────────────────────────────────
+    - path: /usr/local/share/holo-node/wifi-connecting.html
+      mode: 0644
+      contents:
+        inline: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Holo Node — Connecting</title>
+            <style>
+              *{box-sizing:border-box;margin:0;padding:0}
+              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
+                display:flex;align-items:center;justify-content:center;padding:20px}
+              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
+                padding:40px;width:100%;max-width:420px;text-align:center}
+              h1{font-size:20px;color:#a78bfa;margin-bottom:12px}
+              p{color:#666680;font-size:14px;line-height:1.6}
+              .spinner{width:40px;height:40px;border:3px solid #2a2a3a;
+                border-top-color:#7c3aed;border-radius:50%;
+                animation:spin .8s linear infinite;margin:28px auto}
+              @keyframes spin{to{transform:rotate(360deg)}}
+              .note{margin-top:24px;background:#1a1a2e;border:1px solid #2a2a4a;
+                border-radius:10px;padding:14px 16px;font-size:13px;
+                color:#9999bb;line-height:1.5;text-align:left}
+            </style>
+          </head>
+          <body><div class="card">
+            <h1>Connecting...</h1>
+            <div class="spinner"></div>
+            <p>Connecting your node to your WiFi network.<br>
+            This may take up to 30 seconds.</p>
+            <div class="note">Your device will disconnect from HoloNode-Setup.
+            Once the node is online, find its IP on your router and open
+            <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.
+            </div>
+          </div></body></html>
 
     # ── node-setup.sh ──────────────────────────────────────────────────────────
     - path: /usr/local/bin/node-setup.sh
@@ -64,12 +159,12 @@ storage:
           LISTEN_PORT="8080"
           LOG="[node-setup]"
           ISSUE_FILE="/run/issue.d/50-node-setup.issue"
+          FORM_HTML="/usr/local/share/holo-node/wifi-form.html"
+          CONNECTING_HTML="/usr/local/share/holo-node/wifi-connecting.html"
 
           mkdir -p /run/issue.d
 
           # ── error trap ──────────────────────────────────────────────────────
-          # Catches any unhandled error and writes full context to the login
-          # prompt so operators see exactly what failed without needing SSH.
           trap_error() {
             local exit_code=$?
             local line=$1
@@ -156,107 +251,22 @@ storage:
             } > "$ISSUE_FILE"
           }
 
-          # ── HTML pages ───────────────────────────────────────────────────────
-
-          read -r -d '' FORM_HTML << 'HTMLEOF' || true
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>Holo Node Setup</title>
-            <style>
-              *{box-sizing:border-box;margin:0;padding:0}
-              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
-                display:flex;align-items:center;justify-content:center;padding:20px}
-              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
-                padding:40px;width:100%;max-width:420px}
-              h1{font-size:22px;font-weight:600;color:#a78bfa;
-                text-align:center;margin-bottom:8px}
-              .sub{text-align:center;color:#666680;font-size:13px;margin-bottom:28px}
-              .info{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
-                padding:14px 16px;font-size:13px;color:#9999bb;
-                margin-bottom:28px;line-height:1.5}
-              label{display:block;font-size:13px;font-weight:500;color:#9999bb;
-                margin-bottom:6px;margin-top:20px}
-              label:first-of-type{margin-top:0}
-              input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;
-                border-radius:8px;padding:10px 14px;color:#e8e8f0;
-                font-size:15px;outline:none}
-              button{width:100%;background:#7c3aed;color:white;border:none;
-                border-radius:8px;padding:12px;font-size:15px;
-                font-weight:600;cursor:pointer;margin-top:28px}
-            </style>
-          </head>
-          <body><div class="card">
-            <h1>Holo Node Setup</h1>
-            <p class="sub">WiFi Configuration</p>
-            <div class="info">Your node is in setup mode. You are connected to
-            <strong>HoloNode-Setup</strong>. Enter your home WiFi credentials
-            to connect your node to the internet.</div>
-            <form method="POST" action="/connect">
-              <label for="ssid">WiFi Network Name (SSID)</label>
-              <input type="text" id="ssid" name="ssid"
-                placeholder="Your WiFi network" autocomplete="off" required>
-              <label for="password">WiFi Password</label>
-              <input type="password" id="password" name="password"
-                placeholder="Your WiFi password" autocomplete="off">
-              <button type="submit">Connect &amp; Continue</button>
-            </form>
-          </div></body></html>
-          HTMLEOF
-
-          read -r -d '' CONNECTING_HTML << 'HTMLEOF' || true
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>Holo Node — Connecting</title>
-            <style>
-              *{box-sizing:border-box;margin:0;padding:0}
-              body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-                background:#0a0a0f;color:#e8e8f0;min-height:100vh;
-                display:flex;align-items:center;justify-content:center;padding:20px}
-              .card{background:#13131a;border:1px solid #2a2a3a;border-radius:16px;
-                padding:40px;width:100%;max-width:420px;text-align:center}
-              h1{font-size:20px;color:#a78bfa;margin-bottom:12px}
-              p{color:#666680;font-size:14px;line-height:1.6}
-              .spinner{width:40px;height:40px;border:3px solid #2a2a3a;
-                border-top-color:#7c3aed;border-radius:50%;
-                animation:spin .8s linear infinite;margin:28px auto}
-              @keyframes spin{to{transform:rotate(360deg)}}
-              .note{margin-top:24px;background:#1a1a2e;border:1px solid #2a2a4a;
-                border-radius:10px;padding:14px 16px;font-size:13px;
-                color:#9999bb;line-height:1.5;text-align:left}
-            </style>
-          </head>
-          <body><div class="card">
-            <h1>Connecting...</h1>
-            <div class="spinner"></div>
-            <p>Connecting your node to your WiFi network.<br>
-            This may take up to 30 seconds.</p>
-            <div class="note">Your device will disconnect from HoloNode-Setup.
-            Once the node is online, find its IP on your router and open
-            <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.
-            </div>
-          </div></body></html>
-          HTMLEOF
-
           # ── HTTP server loop ─────────────────────────────────────────────────
 
           serve_wifi_ui() {
             local wifi_iface="$1"
+            local form_size connecting_size
+            form_size=$(wc -c < "$FORM_HTML")
+            connecting_size=$(wc -c < "$CONNECTING_HTML")
 
             while true; do
               local post_body=""
 
               post_body=$(
                 {
-                  local request_line=""
-                  local content_length=0
-                  local method="" path=""
+                  local request_line method path content_length body
+                  content_length=0
+                  body=""
 
                   IFS= read -r request_line
                   request_line="${request_line%$'\r'}"
@@ -272,7 +282,6 @@ storage:
                     fi
                   done
 
-                  local body=""
                   if [ "$method" = "POST" ] && [ "${content_length:-0}" -gt 0 ]; then
                     IFS= read -r -d '' -n "$content_length" body 2>/dev/null || true
                   fi
@@ -282,13 +291,15 @@ storage:
                       printf "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                       ;;
                     /connect)
-                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
-                        "${#CONNECTING_HTML}" "$CONNECTING_HTML"
+                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" \
+                        "$connecting_size"
+                      cat "$CONNECTING_HTML"
                       echo "POSTBODY:${body}"
                       ;;
                     *)
-                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
-                        "${#FORM_HTML}" "$FORM_HTML"
+                      printf "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" \
+                        "$form_size"
+                      cat "$FORM_HTML"
                       ;;
                   esac
                 } | nc -l -p "$LISTEN_PORT" -q 2 2>/dev/null | grep "^POSTBODY:" | head -1 || true
@@ -412,25 +423,6 @@ systemd:
         StandardError=journal
         SyslogIdentifier=node-onboarding
         NoNewPrivileges=yes
-
-        [Install]
-        WantedBy=multi-user.target
-
-    # ── install-zeroclaw.service ───────────────────────────────────────────────
-    - name: install-zeroclaw.service
-      contents: |
-        [Unit]
-        Description=Install ZeroClaw AI Agent
-        After=network-online.target
-        ConditionPathExists=!/etc/zeroclaw/installed
-        Before=node-onboarding.service
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=yes
-        ExecStart=/usr/local/bin/install-zeroclaw.sh
-        StandardOutput=journal
-        StandardError=journal
 
         [Install]
         WantedBy=multi-user.target
