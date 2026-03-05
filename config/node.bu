@@ -189,15 +189,17 @@ storage:
           log() { echo "$LOG $*"; }
 
           # Retry up to 10 times with 3s gaps (30s total) before giving up.
-          # Guards against the service starting before routing is established.
-          # NOTE: curl is wrapped in an explicit `if` so that set -e does not
-          # abort the retry loop on the first failed attempt.
+          # Stage 1: ping to confirm basic routing (no DNS dependency).
+          # Stage 2: curl to confirm internet + GitHub reachability.
+          # Both wrapped in `if` so set -e does not abort the retry loop.
           has_internet() {
             local i
             for i in $(seq 1 10); do
-              if curl -fsS --max-time 5 --connect-timeout 5 \
-                  -o /dev/null https://api.github.com 2>/dev/null; then
-                return 0
+              if ping -c1 -W3 8.8.8.8 &>/dev/null; then
+                if curl -fsS --max-time 5 --connect-timeout 5 \
+                    -o /dev/null https://api.github.com 2>/dev/null; then
+                  return 0
+                fi
               fi
               sleep 3
             done
@@ -253,20 +255,10 @@ storage:
           }
 
           download_zeroclaw() {
-            local ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
             local ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
-
-            log "Fetching latest ZeroClaw release info..."
-            local release_json
-            release_json=$(curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: holo-node-setup" \
-              "https://api.github.com/repos/${ZEROCLAW_REPO}/releases/latest")
 
             local arch
             arch=$(uname -m)
-            # Asset names: zeroclaw-aarch64-unknown-linux-gnu.tar.gz
-            #              zeroclaw-x86_64-unknown-linux-gnu.tar.gz
             local triple
             if [ "$arch" = "aarch64" ]; then
               triple="aarch64-unknown-linux-gnu"
@@ -274,16 +266,8 @@ storage:
               triple="x86_64-unknown-linux-gnu"
             fi
             local asset_name="zeroclaw-${triple}.tar.gz"
-
-            local url
-            url=$(echo "$release_json" | \
-              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
-              grep -o 'https://[^"]*')
-
-            if [ -z "$url" ]; then
-              log "ERROR: Could not find ZeroClaw asset ${asset_name} in release"
-              exit 1
-            fi
+            # Use direct latest/download URL — no API call, no rate limiting
+            local url="https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download/${asset_name}"
 
             log "Downloading ZeroClaw from: $url"
             local tmp_dir
@@ -395,6 +379,11 @@ storage:
 
           log "Starting Holo Node first-boot setup"
 
+          # Give the network stack time to settle before probing.
+          # network-online.target is reached before this service starts but
+          # routing and DNS can still be establishing in the background.
+          sleep 10
+
           # Fast path: ethernet node with internet
           if has_internet; then
             log "Internet available — downloading node-onboarding"
@@ -444,6 +433,7 @@ systemd:
         [Service]
         Type=oneshot
         RemainAfterExit=yes
+        ExecStartPre=/bin/bash -c 'until ip route get 8.8.8.8 &>/dev/null; do sleep 1; done'
         ExecStartPre=/bin/bash -c 'mkdir -p /run/issue.d && printf "\n[node-setup] starting...\n" > /run/issue.d/50-node-setup.issue'
         ExecStart=/usr/local/bin/node-setup.sh
         StandardOutput=journal
