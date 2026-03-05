@@ -188,9 +188,16 @@ storage:
 
           log() { echo "$LOG $*"; }
 
+          # Retry up to 10 times with 3s gaps (30s total) before giving up.
+          # Guards against the service starting before routing is established.
           has_internet() {
-            curl -fsS --max-time 5 --connect-timeout 5 \
-              -o /dev/null https://api.github.com 2>/dev/null
+            local i
+            for i in $(seq 1 10); do
+              curl -fsS --max-time 5 --connect-timeout 5 \
+                -o /dev/null https://api.github.com 2>/dev/null && return 0
+              sleep 3
+            done
+            return 1
           }
 
           detect_wifi_iface() {
@@ -341,13 +348,7 @@ storage:
 
           log "Starting Holo Node first-boot setup"
 
-          # Wait for NetworkManager (up to 30s)
-          for i in $(seq 1 30); do
-            nmcli general status &>/dev/null && break
-            sleep 1
-          done
-
-          # Fast path: internet already reachable
+          # Fast path: ethernet node with internet
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
@@ -386,8 +387,8 @@ systemd:
       contents: |
         [Unit]
         Description=Holo Node — first-boot network setup and binary install
-        After=network.target NetworkManager.service
-        Wants=NetworkManager.service
+        After=network-online.target
+        Wants=network-online.target
         ConditionPathExists=!/usr/local/bin/node-onboarding
         Before=node-onboarding.service
 
