@@ -383,6 +383,7 @@ systemd:
         [Service]
         Type=oneshot
         RemainAfterExit=yes
+        ExecStartPre=/bin/bash -c 'mkdir -p /run/issue.d && printf "\n[node-setup] starting...\n" > /run/issue.d/50-node-setup.issue'
         ExecStart=/usr/local/bin/node-setup.sh
         StandardOutput=journal
         StandardError=journal
