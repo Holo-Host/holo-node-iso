@@ -144,6 +144,68 @@ storage:
             </div>
           </div></body></html>
 
+    # ── zeroclaw-update.sh ────────────────────────────────────────────────────
+    - path: /usr/local/bin/zeroclaw-update.sh
+      mode: 0755
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
+          ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
+          LOG="[zeroclaw-update]"
+
+          log() { echo "$LOG $*"; }
+
+          arch=$(uname -m)
+          if [ "$arch" = "aarch64" ]; then
+            triple="aarch64-unknown-linux-gnu"
+          else
+            triple="x86_64-unknown-linux-gnu"
+          fi
+          asset_name="zeroclaw-${triple}.tar.gz"
+
+          log "Checking for recent ZeroClaw releases..."
+          releases_json=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: holo-node-setup" \
+            "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
+
+          # Find the most recent download URL that matches the asset name
+          url=$(echo "$releases_json" | \
+            grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+            head -n 1 | \
+            grep -o 'https://[^"]*')
+
+          if [ -z "$url" ]; then
+            log "ERROR: Could not find asset ${asset_name} in recent releases"
+            exit 1
+          fi
+
+          # Extract the tag (e.g., v0.1.7) directly from the download URL
+          latest_tag=$(echo "$url" | grep -o 'v[0-9][^/]*')
+
+          if [ -x "$ZEROCLAW_BIN" ]; then
+            installed=$("$ZEROCLAW_BIN" --version 2>/dev/null | grep -o 'v[0-9][^ ]*' || echo "unknown")
+            if [ "$installed" = "$latest_tag" ]; then
+              log "Already up to date: $installed"
+              exit 0
+            fi
+            log "Updating ZeroClaw: $installed -> $latest_tag"
+          else
+            log "ZeroClaw not installed, installing $latest_tag"
+          fi
+
+          log "Downloading from: $url"
+          tmp_dir=$(mktemp -d)
+          curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
+          tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+          install -m 0755 "${tmp_dir}/zeroclaw" "${ZEROCLAW_BIN}.tmp"
+          mv "${ZEROCLAW_BIN}.tmp" "$ZEROCLAW_BIN"
+          rm -rf "$tmp_dir"
+          log "ZeroClaw updated to $latest_tag"
+
     # ── node-setup.sh ──────────────────────────────────────────────────────────
     - path: /usr/local/bin/node-setup.sh
       mode: 0755
@@ -255,6 +317,7 @@ storage:
           }
 
           download_zeroclaw() {
+            local ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
             local ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
 
             local arch
@@ -266,8 +329,28 @@ storage:
               triple="x86_64-unknown-linux-gnu"
             fi
             local asset_name="zeroclaw-${triple}.tar.gz"
-            # Use direct latest/download URL — no API call, no rate limiting
-            local url="https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download/${asset_name}"
+
+            # Brief pause to avoid GitHub API rate limits back-to-back
+            # with the node-onboarding download that just completed.
+            sleep 5
+
+            log "Fetching recent ZeroClaw releases info..."
+            local releases_json
+            releases_json=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: holo-node-setup" \
+              "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
+
+            local url
+            url=$(echo "$releases_json" | \
+              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+              head -n 1 | \
+              grep -o 'https://[^"]*')
+
+            if [ -z "$url" ]; then
+              log "ERROR: Could not find ZeroClaw asset ${asset_name} in recent releases."
+              exit 1
+            fi
 
             log "Downloading ZeroClaw from: $url"
             local tmp_dir
@@ -466,6 +549,36 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
+
+    # ── zeroclaw-update.service ───────────────────────────────────────────────
+    - name: zeroclaw-update.service
+      contents: |
+        [Unit]
+        Description=ZeroClaw — check for and apply binary updates
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/zeroclaw-update.sh
+        StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=zeroclaw-update
+
+    # ── zeroclaw-update.timer ─────────────────────────────────────────────────
+    - name: zeroclaw-update.timer
+      enabled: true
+      contents: |
+        [Unit]
+        Description=ZeroClaw — hourly update check
+
+        [Timer]
+        OnBootSec=10min
+        OnUnitActiveSec=1h
+        Unit=zeroclaw-update.service
+
+        [Install]
+        WantedBy=timers.target
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
     - name: podman-auto-update.timer
