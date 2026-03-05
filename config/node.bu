@@ -248,6 +248,49 @@ storage:
             log "node-onboarding installed successfully"
           }
 
+          download_zeroclaw() {
+            local ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
+            local ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
+
+            log "Fetching latest ZeroClaw release info..."
+            local release_json
+            release_json=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: holo-node-setup" \
+              "https://api.github.com/repos/${ZEROCLAW_REPO}/releases/latest")
+
+            local arch
+            arch=$(uname -m)
+            # Asset names: zeroclaw-aarch64-unknown-linux-gnu.tar.gz
+            #              zeroclaw-x86_64-unknown-linux-gnu.tar.gz
+            local triple
+            if [ "$arch" = "aarch64" ]; then
+              triple="aarch64-unknown-linux-gnu"
+            else
+              triple="x86_64-unknown-linux-gnu"
+            fi
+            local asset_name="zeroclaw-${triple}.tar.gz"
+
+            local url
+            url=$(echo "$release_json" | \
+              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+              grep -o 'https://[^"]*')
+
+            if [ -z "$url" ]; then
+              log "ERROR: Could not find ZeroClaw asset ${asset_name} in release"
+              exit 1
+            fi
+
+            log "Downloading ZeroClaw from: $url"
+            local tmp_dir
+            tmp_dir=$(mktemp -d)
+            curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
+            tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+            install -m 0755 "${tmp_dir}/zeroclaw" "$ZEROCLAW_BIN"
+            rm -rf "$tmp_dir"
+            log "zeroclaw installed successfully"
+          }
+
           setup_complete() {
             {
               printf '\n\033[1;32m╔══════════════════════════════════════════════╗\033[0m\n'
@@ -352,6 +395,7 @@ storage:
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
+            download_zeroclaw
             setup_complete
             exit 0
           fi
@@ -375,6 +419,7 @@ storage:
 
           log "WiFi configured — downloading node-onboarding"
           download_binary
+          download_zeroclaw
           setup_complete
           exit 0
 
