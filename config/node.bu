@@ -144,6 +144,68 @@ storage:
             </div>
           </div></body></html>
 
+    # ── zeroclaw-update.sh ────────────────────────────────────────────────────
+    - path: /usr/local/bin/zeroclaw-update.sh
+      mode: 0755
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
+          ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
+          LOG="[zeroclaw-update]"
+
+          log() { echo "$LOG $*"; }
+
+          arch=$(uname -m)
+          if [ "$arch" = "aarch64" ]; then
+            triple="aarch64-unknown-linux-gnu"
+          else
+            triple="x86_64-unknown-linux-gnu"
+          fi
+          asset_name="zeroclaw-${triple}.tar.gz"
+
+          log "Checking for recent ZeroClaw releases..."
+          releases_json=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: holo-node-setup" \
+            "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
+
+          # Find the most recent download URL that matches the asset name
+          url=$(echo "$releases_json" | \
+            grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+            head -n 1 | \
+            grep -o 'https://[^"]*')
+
+          if [ -z "$url" ]; then
+            log "ERROR: Could not find asset ${asset_name} in recent releases"
+            exit 1
+          fi
+
+          # Extract the tag (e.g., v0.1.7) directly from the download URL
+          latest_tag=$(echo "$url" | grep -o 'v[0-9][^/]*')
+
+          if [ -x "$ZEROCLAW_BIN" ]; then
+            installed=$("$ZEROCLAW_BIN" --version 2>/dev/null | grep -o 'v[0-9][^ ]*' || echo "unknown")
+            if [ "$installed" = "$latest_tag" ]; then
+              log "Already up to date: $installed"
+              exit 0
+            fi
+            log "Updating ZeroClaw: $installed -> $latest_tag"
+          else
+            log "ZeroClaw not installed, installing $latest_tag"
+          fi
+
+          log "Downloading from: $url"
+          tmp_dir=$(mktemp -d)
+          curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
+          tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+          install -m 0755 "${tmp_dir}/zeroclaw" "${ZEROCLAW_BIN}.tmp"
+          mv "${ZEROCLAW_BIN}.tmp" "$ZEROCLAW_BIN"
+          rm -rf "$tmp_dir"
+          log "ZeroClaw updated to $latest_tag"
+
     # ── node-setup.sh ──────────────────────────────────────────────────────────
     - path: /usr/local/bin/node-setup.sh
       mode: 0755
@@ -188,9 +250,22 @@ storage:
 
           log() { echo "$LOG $*"; }
 
+          # Retry up to 10 times with 3s gaps (30s total) before giving up.
+          # Stage 1: ping to confirm basic routing (no DNS dependency).
+          # Stage 2: curl to confirm internet + GitHub reachability.
+          # Both wrapped in `if` so set -e does not abort the retry loop.
           has_internet() {
-            curl -fsS --max-time 5 --connect-timeout 5 \
-              -o /dev/null https://api.github.com 2>/dev/null
+            local i
+            for i in $(seq 1 10); do
+              if ping -c1 -W3 8.8.8.8 &>/dev/null; then
+                if curl -fsS --max-time 5 --connect-timeout 5 \
+                    -o /dev/null https://api.github.com 2>/dev/null; then
+                  return 0
+                fi
+              fi
+              sleep 3
+            done
+            return 1
           }
 
           detect_wifi_iface() {
@@ -239,6 +314,52 @@ storage:
             chmod +x "${ONBOARDING_BIN}.tmp"
             mv "${ONBOARDING_BIN}.tmp" "$ONBOARDING_BIN"
             log "node-onboarding installed successfully"
+          }
+
+          download_zeroclaw() {
+            local ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
+            local ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
+
+            local arch
+            arch=$(uname -m)
+            local triple
+            if [ "$arch" = "aarch64" ]; then
+              triple="aarch64-unknown-linux-gnu"
+            else
+              triple="x86_64-unknown-linux-gnu"
+            fi
+            local asset_name="zeroclaw-${triple}.tar.gz"
+
+            # Brief pause to avoid GitHub API rate limits back-to-back
+            # with the node-onboarding download that just completed.
+            sleep 5
+
+            log "Fetching recent ZeroClaw releases info..."
+            local releases_json
+            releases_json=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: holo-node-setup" \
+              "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
+
+            local url
+            url=$(echo "$releases_json" | \
+              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
+              head -n 1 | \
+              grep -o 'https://[^"]*')
+
+            if [ -z "$url" ]; then
+              log "ERROR: Could not find ZeroClaw asset ${asset_name} in recent releases."
+              exit 1
+            fi
+
+            log "Downloading ZeroClaw from: $url"
+            local tmp_dir
+            tmp_dir=$(mktemp -d)
+            curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
+            tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
+            install -m 0755 "${tmp_dir}/zeroclaw" "$ZEROCLAW_BIN"
+            rm -rf "$tmp_dir"
+            log "zeroclaw installed successfully"
           }
 
           setup_complete() {
@@ -341,16 +462,16 @@ storage:
 
           log "Starting Holo Node first-boot setup"
 
-          # Wait for NetworkManager (up to 30s)
-          for i in $(seq 1 30); do
-            nmcli general status &>/dev/null && break
-            sleep 1
-          done
+          # Give the network stack time to settle before probing.
+          # network-online.target is reached before this service starts but
+          # routing and DNS can still be establishing in the background.
+          sleep 10
 
-          # Fast path: internet already reachable
+          # Fast path: ethernet node with internet
           if has_internet; then
             log "Internet available — downloading node-onboarding"
             download_binary
+            download_zeroclaw
             setup_complete
             exit 0
           fi
@@ -374,6 +495,7 @@ storage:
 
           log "WiFi configured — downloading node-onboarding"
           download_binary
+          download_zeroclaw
           setup_complete
           exit 0
 
@@ -386,14 +508,15 @@ systemd:
       contents: |
         [Unit]
         Description=Holo Node — first-boot network setup and binary install
-        After=network.target NetworkManager.service
-        Wants=NetworkManager.service
+        After=network-online.target
+        Wants=network-online.target
         ConditionPathExists=!/usr/local/bin/node-onboarding
         Before=node-onboarding.service
 
         [Service]
         Type=oneshot
         RemainAfterExit=yes
+        ExecStartPre=/bin/bash -c 'until ip route get 8.8.8.8 &>/dev/null; do sleep 1; done'
         ExecStartPre=/bin/bash -c 'mkdir -p /run/issue.d && printf "\n[node-setup] starting...\n" > /run/issue.d/50-node-setup.issue'
         ExecStart=/usr/local/bin/node-setup.sh
         StandardOutput=journal
@@ -426,6 +549,36 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
+
+    # ── zeroclaw-update.service ───────────────────────────────────────────────
+    - name: zeroclaw-update.service
+      contents: |
+        [Unit]
+        Description=ZeroClaw — check for and apply binary updates
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/zeroclaw-update.sh
+        StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=zeroclaw-update
+
+    # ── zeroclaw-update.timer ─────────────────────────────────────────────────
+    - name: zeroclaw-update.timer
+      enabled: true
+      contents: |
+        [Unit]
+        Description=ZeroClaw — hourly update check
+
+        [Timer]
+        OnBootSec=10min
+        OnUnitActiveSec=1h
+        Unit=zeroclaw-update.service
+
+        [Install]
+        WantedBy=timers.target
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
     - name: podman-auto-update.timer
