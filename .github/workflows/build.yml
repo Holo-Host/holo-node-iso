@@ -11,14 +11,8 @@ jobs:
   setup-tools:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Butane
-        run: |
-          curl -fsSL \
-            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-            -o /usr/local/bin/butane
-          chmod +x /usr/local/bin/butane
-          butane --version
-
+      # Note: We removed the Butane installation from this job since 
+      # the build job runs on a fresh runner and needs its own setup anyway.
       - name: Cache coreos-installer
         id: cache-coreos-installer
         uses: actions/cache@v4
@@ -53,12 +47,16 @@ jobs:
           wait
           df -h
 
-      - name: Install Butane
+      - name: Setup Butane (Container Wrapper)
         run: |
-          curl -fsSL \
-            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-            -o /usr/local/bin/butane
-          chmod +x /usr/local/bin/butane
+          # Create a wrapper script so other tools can just call `butane` normally.
+          # We mount the GitHub Workspace so Butane has access to your repo's files.
+          # Pinned to v0.26.0 for stability, avoiding the 'latest' floating tag trap.
+          cat << 'EOF' | sudo tee /usr/local/bin/butane
+          #!/bin/bash
+          docker run --rm -i -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "$PWD" quay.io/coreos/butane:v0.26.0 "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/butane
 
       - name: Restore coreos-installer from cache
         uses: actions/cache@v4
@@ -73,6 +71,8 @@ jobs:
             cargo install coreos-installer
           fi
           sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
+          
+          # Verify both tools are working
           butane --version
           coreos-installer --version
 
