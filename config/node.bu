@@ -550,6 +550,27 @@ systemd:
         [Install]
         WantedBy=multi-user.target
 
+    # ── zeroclaw-daemon.service ───────────────────────────────────────────────
+    - name: zeroclaw-daemon.service
+      contents: |
+        [Unit]
+        Description=ZeroClaw AI Agent Daemon
+        After=network-online.target node-onboarding.service
+        Wants=network-online.target
+
+        [Service]
+        Type=simple
+        ExecStart=/usr/local/bin/zeroclaw --config-dir /etc/zeroclaw daemon
+        Restart=on-failure
+        RestartSec=10
+        StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=zeroclaw-daemon
+        Environment=HOME=/root
+
+        [Install]
+        WantedBy=multi-user.target
+
     # ── zeroclaw-update.service ───────────────────────────────────────────────
     - name: zeroclaw-update.service
       contents: |
