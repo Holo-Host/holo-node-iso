@@ -17,7 +17,7 @@ The image is built using [Butane](https://coreos.github.io/butane/) (which compi
 7. [Ignition configuration reference](#ignition-configuration-reference)
 8. [Setting up the GitHub Actions pipeline](#setting-up-the-github-actions-pipeline)
 9. [Shipping a new ISO release](#shipping-a-new-iso-release)
-10. [Relationship between this repo and node-onboarding](#relationship-between-this-repo-and-node-onboarding)
+10. [Relationship between this repo and node-manager](#relationship-between-this-repo-and-node-manager)
 11. [Testing a build](#testing-a-build)
 12. [Troubleshooting](#troubleshooting)
 
@@ -26,14 +26,14 @@ The image is built using [Butane](https://coreos.github.io/butane/) (which compi
 ## How it fits into the system
 
 ```
-holo-host/node-onboarding            holo-host/holo-node-iso
+holo-host/node-manager               holo-host/holo-node-iso
         │                                      │
         │  Rust source + release               │  Butane YAML + build scripts
         │  pipeline                            │
         │                                      │
         │  Publishes binaries:                 │  Produces:
-        │  node-onboarding-x86_64              │  holo-node-x86_64.iso
-        │  node-onboarding-aarch64             │  holo-node-aarch64.iso
+        │  node-manager-x86_64                 │  holo-node-x86_64.iso
+        │  node-manager-aarch64                │  holo-node-aarch64.iso
         │                                      │
         │  ◄── downloaded at first boot ───────┤  (node-setup.sh fetches the
         │       by node-setup.sh               │   binary on first boot)
@@ -41,12 +41,12 @@ holo-host/node-onboarding            holo-host/holo-node-iso
 
                      Node operator
                      flashes ISO → hardware auto-installs FCOS → reboots
-                     → node-setup.sh runs → downloads node-onboarding
+                     → node-setup.sh runs → downloads node-manager
                      → operator visits http://<ip>:8080
                      → completes setup wizard → node is running
 ```
 
-Once a node is running, **the node-onboarding binary updates itself automatically** from `holo-host/node-onboarding` GitHub Releases. You do not need to build or ship a new ISO to deliver software updates to running nodes. The ISO only needs to be rebuilt when:
+Once a node is running, **the node-manager binary updates itself automatically** from `holo-host/node-manager` GitHub Releases. You do not need to build or ship a new ISO to deliver software updates to running nodes. The ISO only needs to be rebuilt when:
 
 - The FCOS base image needs updating (security patches, kernel updates)
 - The Ignition/systemd configuration changes
@@ -58,15 +58,14 @@ Once a node is running, **the node-onboarding binary updates itself automaticall
 | Component | Description |
 |-----------|-------------|
 | Fedora CoreOS (FCOS) | Minimal immutable OS base; automatic OS updates via rpm-ostree |
-| `node-setup.sh` | Inlined bash script; runs once on first boot to download `node-onboarding`. On ethernet nodes it downloads directly. On WiFi-only nodes it starts a temporary AP and serves a WiFi credentials form first. |
-| `node-setup.service` | systemd unit that runs `node-setup.sh` on first boot only |
-| `node-onboarding.service` | systemd unit that starts the management server after `node-setup.service` completes |
-| `install-zeroclaw.service` | systemd unit that installs the ZeroClaw agent on first boot (only if operator enables it during onboarding) |
-| Podman + crun | Container runtime; no Docker daemon |
-| `holo` user | Dedicated low-privilege user for SSH access |
-| SSH hardening | Root login disabled; password auth disabled; SSH keys only |
+| `node-setup.sh` | Inlined bash script; runs once on first boot to download `node-manager`. On ethernet nodes it downloads directly. On WiFi-only nodes it first starts a captive-portal AP to collect credentials. |
+| `node-manager.service` | Permanent systemd service; starts after `node-setup.service` exits |
+| `openclaw-daemon.service` | OpenClaw AI agent service; started by `node-manager` after operator enables it |
+| `openclaw-update.service` / `.timer` | Hourly timer that pulls the latest OpenClaw fork binary to `/usr/local/bin/openclaw` |
+| `podman-auto-update.timer` | Nightly container image refresh via `io.containers.autoupdate=registry` labels |
+| SSH hardening | Root login disabled; password auth disabled; `holo` is the only SSH-accessible user |
 
-**Note:** The `node-onboarding` binary is not embedded in the ISO. It is downloaded at first boot by `node-setup.sh`. This keeps the ISO small and avoids the 262KB initramfs size limit imposed by `coreos-installer iso customize`.
+There is no build-time dependency on `node-manager` — the ISO contains no management binary.
 
 ---
 
@@ -78,9 +77,9 @@ Once a node is running, **the node-onboarding binary updates itself automaticall
 ISO boots → FCOS auto-installs to internal disk → reboots from disk
 → node-setup.service starts
 → node-setup.sh detects internet via ethernet
-→ downloads node-onboarding from GitHub Releases
+→ downloads node-manager from GitHub Releases
 → node-setup.service exits
-→ node-onboarding.service starts
+→ node-manager.service starts
 → operator opens http://<node-ip>:8080 → completes setup
 → node-setup.service never runs again (binary now exists on disk)
 ```
@@ -96,9 +95,9 @@ ISO boots → FCOS auto-installs to internal disk → reboots from disk
 → operator connects phone/laptop to HoloNode-Setup
 → operator opens http://192.168.4.1:8080
 → operator enters home WiFi SSID and password → submits
-→ node connects to WiFi, downloads node-onboarding
+→ node connects to WiFi, downloads node-manager
 → node-setup.service exits
-→ node-onboarding.service starts
+→ node-manager.service starts
 → operator connects to home network, opens http://<node-ip>:8080
 → completes setup
 ```
@@ -172,7 +171,7 @@ This will:
 3. Embed the Ignition config into the ISO using coreos-installer
 4. Output `holo-node-x86_64.iso` in the project root
 
-Note: `node-onboarding` is **not** fetched at build time. It is downloaded by `node-setup.sh` on the node's first boot.
+Note: `node-manager` is **not** fetched at build time. It is downloaded by `node-setup.sh` on the node's first boot.
 
 ### Building for ARM (aarch64)
 
@@ -242,191 +241,63 @@ The `holo` user is the only SSH-accessible account. No SSH keys are baked in —
 
 The first-boot script is inlined directly in `node.bu` via `contents.inline`. It is a bash script, not a binary — this is intentional. Any binary large enough to be useful would exceed the 262KB initramfs size limit imposed by `coreos-installer iso customize`. A bash script compresses to a few KB.
 
-The script:
-- Waits for NetworkManager to be ready
-- Tests for internet connectivity via `curl`
-- **Ethernet path:** downloads `node-onboarding` from the latest GitHub Release and exits
-- **WiFi path:** finds the WiFi interface, starts a hotspot via `nmcli`, serves a WiFi credentials form via an HTTP server loop using `nc`, connects to the provided network, then downloads `node-onboarding`
-- Is guarded by `ConditionPathExists=!/usr/local/bin/node-onboarding` in its service unit — never runs again once the binary exists on disk
+The script's only job is to download `node-manager` from the latest GitHub Release and install it to `/usr/local/bin/node-manager`. It runs exactly once, gated by `ConditionPathExists=!/usr/local/bin/node-manager` in the systemd unit.
 
 ### systemd units
 
-| Unit | Enabled | Purpose |
-|------|---------|---------|
-| `node-setup.service` | yes | Runs `node-setup.sh` once on first boot |
-| `node-onboarding.service` | yes | Starts the management server; requires `node-setup.service` |
-| `install-zeroclaw.service` | no | Installs ZeroClaw agent; enabled conditionally by node-onboarding |
-| `podman-auto-update.timer` | yes | Daily container image updates |
-
-### Firewall note
-
-FCOS ships with `firewalld` enabled. Port 8080 is not open by default. If you cannot reach the setup UI, add a firewalld rule to `node.bu`:
-
-```yaml
-storage:
-  files:
-    - path: /etc/firewalld/zones/home.xml
-      mode: 0644
-      contents:
-        inline: |
-          <?xml version="1.0" encoding="utf-8"?>
-          <zone>
-            <short>Home</short>
-            <service name="ssh"/>
-            <port port="8080" protocol="tcp"/>
-          </zone>
-```
+| Unit | Type | Enabled | Description |
+|------|------|---------|-------------|
+| `node-setup.service` | oneshot | yes | First-boot download of `node-manager` |
+| `node-manager.service` | simple | yes | Permanent management server on :8080 |
+| `openclaw-daemon.service` | simple | no | OpenClaw AI agent; started by node-manager |
+| `openclaw-update.service` | oneshot | no | Pulls latest OpenClaw fork binary |
+| `openclaw-update.timer` | timer | yes | Triggers openclaw-update.service every hour |
+| `podman-auto-update.timer` | timer | yes | Nightly container image refresh |
 
 ---
 
 ## Setting up the GitHub Actions pipeline
 
-The pipeline uses two jobs to work around the fact that `coreos-installer` must be compiled from source (~3 minutes) and GitHub Actions runners don't cache between jobs by default:
+The `.github/workflows/build.yml` workflow builds ISOs automatically on push to `main` and on version tags. It requires no secrets — the build is entirely public tooling (Butane + coreos-installer).
 
-- **`setup-tools`** — compiles and caches `coreos-installer`; only recompiles on a cache miss
-- **`build`** — runs in parallel for x86_64 and aarch64; restores the cache from `setup-tools`
+To publish a release ISO as a GitHub Release artifact, create a version tag:
 
-Full `build.yml`:
-
-```yaml
-name: Build ISO
-
-on:
-  push:
-    branches: [main]
-  release:
-    types: [published]
-  workflow_dispatch:
-
-jobs:
-  setup-tools:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Butane
-        run: |
-          curl -fsSL \
-            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-            -o /usr/local/bin/butane
-          chmod +x /usr/local/bin/butane
-
-      - name: Cache coreos-installer
-        id: cache-coreos-installer
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/coreos-installer
-          key: coreos-installer-v0.25.0
-
-      - name: Build coreos-installer
-        if: steps.cache-coreos-installer.outputs.cache-hit != 'true'
-        run: cargo install coreos-installer
-
-  build:
-    needs: setup-tools
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        arch: [x86_64, aarch64]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc &
-          wait
-
-      - name: Install Butane
-        run: |
-          curl -fsSL \
-            https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-            -o /usr/local/bin/butane
-          chmod +x /usr/local/bin/butane
-
-      - name: Restore coreos-installer
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/coreos-installer
-          key: coreos-installer-v0.25.0
-
-      - name: Install coreos-installer
-        run: |
-          if [ ! -f ~/.cargo/bin/coreos-installer ]; then
-            cargo install coreos-installer
-          fi
-          sudo cp ~/.cargo/bin/coreos-installer /usr/local/bin/coreos-installer
-
-      - name: Install curl and jq
-        run: sudo apt-get install -y curl jq
-
-      - name: Build ISO (${{ matrix.arch }})
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          chmod +x scripts/build.sh
-          ./scripts/build.sh
-
-      - name: Upload ISO as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: holo-node-${{ matrix.arch }}-iso
-          path: holo-node-${{ matrix.arch }}.iso
-          retention-days: 30
-
-      - name: Attach to GitHub Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: holo-node-${{ matrix.arch }}.iso
+```bash
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
-**On artifacts vs releases:** Pushes to `main` upload ISOs as workflow artifacts (downloadable from the Actions run page for 30 days). The "Attach to GitHub Release" step is intentionally skipped — the circle-with-slash icon next to it is expected. ISOs are only attached to a release when you create one with a tag.
-
-**On the cache:** The first run after a cache miss compiles coreos-installer (~3 minutes). Every subsequent run skips this. To upgrade coreos-installer, bump the `key` value in both cache steps.
+GitHub Actions will build both architectures and attach them to the release.
 
 ---
 
 ## Shipping a new ISO release
 
-### When do you need a new ISO?
+Rebuild and ship a new ISO when:
 
-| Scenario | New ISO needed? |
-|----------|----------------|
-| Bug fix or feature in the management UI | **No** — ship a `node-onboarding` release; nodes update within ~1 hour |
-| New chat platform support | **No** — ship a `node-onboarding` release |
-| FCOS base image security update | **Yes** |
-| Changes to systemd units, sshd config, or `node-setup.sh` | **Yes** |
-| New hardware support | **Yes** if kernel or firmware changes are needed |
+- The FCOS base image has had significant security patches and you want to bake those in for fresh installs (running nodes update themselves via rpm-ostree; this is for new hardware)
+- The `node.bu` Ignition config has changed (new systemd units, updated `node-setup.sh`, changed SSH hardening)
 
-### Steps
-
-1. Make changes to `config/node.bu` and/or `scripts/build.sh`
-2. Validate: `butane --strict --check config/node.bu`
-3. Build and test locally: `./scripts/build.sh`
-4. Boot in a VM to verify end-to-end (see [Testing a build](#testing-a-build))
-5. Push to `main` — builds artifacts you can download and test
-6. When ready to ship: create a GitHub Release tagged `iso-v<date>` e.g. `iso-v2026-03-04`
-7. Actions builds both ISOs and attaches them to the release automatically
-8. Update your node distribution page / download link to point at the new release
+**Running nodes do not need a new ISO** — `node-manager` self-updates from GitHub Releases, and `openclaw-update.timer` updates the OpenClaw fork binary hourly.
 
 ---
 
-## Relationship between this repo and node-onboarding
+## Relationship between this repo and node-manager
 
-`node-setup.sh` (embedded in the ISO) fetches `node-onboarding` from `holo-host/node-onboarding` GitHub Releases at first boot. There is no build-time dependency — the ISO contains no `node-onboarding` binary.
+There is no build-time dependency — the ISO contains no `node-manager` binary.
 
 ```
-holo-node-iso  ──fetches at first boot──►  holo-host/node-onboarding
+holo-node-iso  ──fetches at first boot──►  holo-host/node-manager
                (via node-setup.sh)          (latest GitHub Release)
 ```
 
-After the initial download, `node-onboarding` updates itself automatically by polling GitHub Releases every hour. The ISO is not involved in updates after first boot.
+After the initial download, `node-manager` updates itself automatically by polling GitHub Releases every hour. The ISO is not involved in updates after first boot.
 
-`node-setup.sh` always fetches the latest release of `node-onboarding`. To pin to a specific version, modify the `download_binary` function in `node-setup.sh` within `config/node.bu`:
+`node-setup.sh` always fetches the latest release of `node-manager`. To pin to a specific version, modify the `download_binary` function in `node-setup.sh` within `config/node.bu`:
 
 ```bash
 # Replace /releases/latest with /releases/tags/v5.1.0:
-"https://api.github.com/repos/${ONBOARDING_REPO}/releases/tags/v5.1.0"
+"https://api.github.com/repos/${MANAGER_REPO}/releases/tags/v5.1.0"
 ```
 
 For most purposes pinning is unnecessary — a node running an older binary will self-update within ~60 seconds of coming online.
@@ -471,7 +342,7 @@ qemu-system-x86_64 \
   -net user,hostfwd=tcp::8080-:8080
 ```
 
-The ISO auto-installs FCOS to `test-disk.img` and reboots. After reboot, `node-setup.sh` downloads `node-onboarding` and starts the management server. Open `http://localhost:8080` to verify the setup UI.
+The ISO auto-installs FCOS to `test-disk.img` and reboots. After reboot, `node-setup.sh` downloads `node-manager` and starts the management server. Open `http://localhost:8080` to verify the setup UI.
 
 ---
 
@@ -485,30 +356,24 @@ The Ignition config is too large for the live ISO's 262KB initramfs limit. This 
 
 1. Confirm the node rebooted from its internal disk (not still running the live ISO)
 2. `systemctl status node-setup.service` — did it complete successfully?
-3. `ls -lh /usr/local/bin/node-onboarding` — was the binary downloaded?
-4. `systemctl status node-onboarding.service` — is it running?
+3. `ls -lh /usr/local/bin/node-manager` — was the binary downloaded?
+4. `systemctl status node-manager.service` — is it running?
 5. `ip addr` — what is the node's IP?
 6. `firewall-cmd --list-all` — is port 8080 open?
-7. `journalctl -u node-setup.service` and `journalctl -u node-onboarding.service` for full logs
+7. `journalctl -u node-setup.service` and `journalctl -u node-manager.service` for full logs
 
-### `node-setup.sh` fails to download node-onboarding
+### `node-setup.sh` fails to download node-manager
 
 Check `journalctl -u node-setup.service`. Common causes:
-- No internet at first boot (WiFi-only node where AP setup wasn't completed)
-- GitHub API rate limiting (script retries automatically with backoff)
-- Release asset name mismatch — assets must be named exactly `node-onboarding-x86_64` and `node-onboarding-aarch64`
 
-### WiFi AP form doesn't load
+- No internet connectivity at first boot — confirm ethernet is plugged in, or complete the WiFi AP flow
+- GitHub API rate limit — unlikely for a single node, but possible in CI/test environments
+- Firewall blocking outbound HTTPS — ensure port 443 is open
 
-- Navigate directly to `http://192.168.4.1:8080` — do not use HTTPS
-- Confirm you are connected to the `HoloNode-Setup` WiFi network (password: `holonode`)
-- Check `journalctl -u node-setup.service -f` on the node to see what the script is doing
-- The HTTP server handles `GET /`, `GET /favicon.ico`, and `POST /connect`; all other paths return the form
+### node-manager won't start
 
-### GitHub Actions: circle with slash next to "Attach to GitHub Release"
+```bash
+journalctl -u node-manager.service -n 50 --no-pager
+```
 
-Expected behaviour. That step only runs on `release` events. On pushes to `main` it is skipped. ISOs are uploaded as workflow artifacts instead. To attach ISOs to a release, create a GitHub Release with a tag.
-
-### coreos-installer takes 3+ minutes in CI
-
-The cache is cold. This happens on the first run or after bumping the cache key. The `setup-tools` job saves the cache independently so subsequent runs skip compilation entirely.
+If the binary exists but the service fails immediately, check that it is executable (`chmod +x /usr/local/bin/node-manager`) and that it is the correct architecture (`file /usr/local/bin/node-manager`).

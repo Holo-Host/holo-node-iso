@@ -20,10 +20,10 @@ storage:
         name: holo
       mode: 0700
 
-    - path: /etc/node-onboarding
+    - path: /etc/node-manager
       mode: 0700
 
-    - path: /etc/zeroclaw
+    - path: /etc/openclaw
       mode: 0700
 
     - path: /etc/containers/systemd
@@ -32,7 +32,7 @@ storage:
     - path: /var/lib/edgenode
       mode: 0755
 
-    - path: /var/lib/zeroclaw/workspace
+    - path: /var/lib/openclaw/workspace
       mode: 0755
 
     - path: /usr/local/share/holo-node
@@ -144,17 +144,28 @@ storage:
             </div>
           </div></body></html>
 
-    # ── zeroclaw-update.sh ────────────────────────────────────────────────────
-    - path: /usr/local/bin/zeroclaw-update.sh
+    # ── openclaw-update.sh ─────────────────────────────────────────────────────
+    # This file is the initial version written to disk by the ISO.
+    # node-manager rewrites the fork config block on every startup via
+    # patch_openclaw_update_script(), so manual edits to that block will be
+    # overwritten. Edit the fork config in node-manager's OPENCLAW_FORKS
+    # constant instead.
+    - path: /usr/local/bin/openclaw-update.sh
       mode: 0755
       contents:
         inline: |
           #!/usr/bin/env bash
           set -euo pipefail
 
-          ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
-          ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
-          LOG="[zeroclaw-update]"
+          # ── Fork config — managed by node-manager; do not edit manually ──────
+          OPENCLAW_FORK_ID="zeroclaw"
+          OPENCLAW_REPO="zeroclaw-labs/zeroclaw"
+          OPENCLAW_ASSET_PREFIX="zeroclaw"     # asset = ${OPENCLAW_ASSET_PREFIX}-${triple}.tar.gz
+          OPENCLAW_BINARY_NAME="zeroclaw"      # name of the binary inside the tar
+          # ─────────────────────────────────────────────────────────────────────
+
+          OPENCLAW_BIN="/usr/local/bin/openclaw"
+          LOG="[openclaw-update]"
 
           log() { echo "$LOG $*"; }
 
@@ -164,15 +175,14 @@ storage:
           else
             triple="x86_64-unknown-linux-gnu"
           fi
-          asset_name="zeroclaw-${triple}.tar.gz"
+          asset_name="${OPENCLAW_ASSET_PREFIX}-${triple}.tar.gz"
 
-          log "Checking for recent ZeroClaw releases..."
+          log "Checking for ${OPENCLAW_FORK_ID} releases..."
           releases_json=$(curl -fsSL \
             -H "Accept: application/vnd.github+json" \
-            -H "User-Agent: holo-node-setup" \
-            "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
+            -H "User-Agent: holo-node-manager" \
+            "https://api.github.com/repos/${OPENCLAW_REPO}/releases")
 
-          # Find the most recent download URL that matches the asset name
           url=$(echo "$releases_json" | \
             grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
             head -n 1 | \
@@ -183,28 +193,27 @@ storage:
             exit 1
           fi
 
-          # Extract the tag (e.g., v0.1.7) directly from the download URL
           latest_tag=$(echo "$url" | grep -o 'v[0-9][^/]*')
 
-          if [ -x "$ZEROCLAW_BIN" ]; then
-            installed=$("$ZEROCLAW_BIN" --version 2>/dev/null | grep -o 'v[0-9][^ ]*' || echo "unknown")
+          if [ -x "$OPENCLAW_BIN" ]; then
+            installed=$("$OPENCLAW_BIN" --version 2>/dev/null | grep -o 'v[0-9][^ ]*' || echo "unknown")
             if [ "$installed" = "$latest_tag" ]; then
               log "Already up to date: $installed"
               exit 0
             fi
-            log "Updating ZeroClaw: $installed -> $latest_tag"
+            log "Updating ${OPENCLAW_FORK_ID}: $installed -> $latest_tag"
           else
-            log "ZeroClaw not installed, installing $latest_tag"
+            log "${OPENCLAW_FORK_ID} not installed, installing $latest_tag"
           fi
 
           log "Downloading from: $url"
           tmp_dir=$(mktemp -d)
           curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
           tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
-          install -m 0755 "${tmp_dir}/zeroclaw" "${ZEROCLAW_BIN}.tmp"
-          mv "${ZEROCLAW_BIN}.tmp" "$ZEROCLAW_BIN"
+          install -m 0755 "${tmp_dir}/${OPENCLAW_BINARY_NAME}" "${OPENCLAW_BIN}.tmp"
+          mv "${OPENCLAW_BIN}.tmp" "$OPENCLAW_BIN"
           rm -rf "$tmp_dir"
-          log "ZeroClaw updated to $latest_tag"
+          log "${OPENCLAW_FORK_ID} updated to $latest_tag"
 
     # ── node-setup.sh ──────────────────────────────────────────────────────────
     - path: /usr/local/bin/node-setup.sh
@@ -214,8 +223,8 @@ storage:
           #!/usr/bin/env bash
           set -euo pipefail
 
-          ONBOARDING_REPO="Holo-Host/node-onboarding"
-          ONBOARDING_BIN="/usr/local/bin/node-onboarding"
+          MANAGER_REPO="Holo-Host/node-manager"
+          MANAGER_BIN="/usr/local/bin/node-manager"
           AP_SSID="HoloNode-Setup"
           AP_PASSWORD="holonode"
           LISTEN_PORT="8080"
@@ -292,12 +301,12 @@ storage:
             release_json=$(curl -fsSL \
               -H "Accept: application/vnd.github+json" \
               -H "User-Agent: holo-node-setup" \
-              "https://api.github.com/repos/${ONBOARDING_REPO}/releases/latest")
+              "https://api.github.com/repos/${MANAGER_REPO}/releases/latest")
 
             local arch
             arch=$(uname -m)
             [ "$arch" = "aarch64" ] || arch="x86_64"
-            local asset_name="node-onboarding-${arch}"
+            local asset_name="node-manager-${arch}"
 
             local url
             url=$(echo "$release_json" | \
@@ -310,56 +319,10 @@ storage:
             fi
 
             log "Downloading from: $url"
-            curl -fsSL "$url" -o "${ONBOARDING_BIN}.tmp"
-            chmod +x "${ONBOARDING_BIN}.tmp"
-            mv "${ONBOARDING_BIN}.tmp" "$ONBOARDING_BIN"
-            log "node-onboarding installed successfully"
-          }
-
-          download_zeroclaw() {
-            local ZEROCLAW_REPO="zeroclaw-labs/zeroclaw"
-            local ZEROCLAW_BIN="/usr/local/bin/zeroclaw"
-
-            local arch
-            arch=$(uname -m)
-            local triple
-            if [ "$arch" = "aarch64" ]; then
-              triple="aarch64-unknown-linux-gnu"
-            else
-              triple="x86_64-unknown-linux-gnu"
-            fi
-            local asset_name="zeroclaw-${triple}.tar.gz"
-
-            # Brief pause to avoid GitHub API rate limits back-to-back
-            # with the node-onboarding download that just completed.
-            sleep 5
-
-            log "Fetching recent ZeroClaw releases info..."
-            local releases_json
-            releases_json=$(curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: holo-node-setup" \
-              "https://api.github.com/repos/${ZEROCLAW_REPO}/releases")
-
-            local url
-            url=$(echo "$releases_json" | \
-              grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
-              head -n 1 | \
-              grep -o 'https://[^"]*')
-
-            if [ -z "$url" ]; then
-              log "ERROR: Could not find ZeroClaw asset ${asset_name} in recent releases."
-              exit 1
-            fi
-
-            log "Downloading ZeroClaw from: $url"
-            local tmp_dir
-            tmp_dir=$(mktemp -d)
-            curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
-            tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
-            install -m 0755 "${tmp_dir}/zeroclaw" "$ZEROCLAW_BIN"
-            rm -rf "$tmp_dir"
-            log "zeroclaw installed successfully"
+            curl -fsSL "$url" -o "${MANAGER_BIN}.tmp"
+            chmod +x "${MANAGER_BIN}.tmp"
+            mv "${MANAGER_BIN}.tmp" "$MANAGER_BIN"
+            log "node-manager installed successfully"
           }
 
           setup_complete() {
@@ -367,7 +330,7 @@ storage:
               printf '\n\033[1;32m╔══════════════════════════════════════════════╗\033[0m\n'
               printf '\033[1;32m║        HOLO NODE SETUP COMPLETE              ║\033[0m\n'
               printf '\033[1;32m╚══════════════════════════════════════════════╝\033[0m\n'
-              printf '\033[1;37mnode-onboarding is installed and starting.\033[0m\n'
+              printf '\033[1;37mnode-manager is installed and starting.\033[0m\n'
               printf '\033[1;37mOpen \033[0;36mhttp://<node-ip>:8080\033[1;37m to complete setup.\033[0m\n\n'
             } > "$ISSUE_FILE"
           }
@@ -469,9 +432,8 @@ storage:
 
           # Fast path: ethernet node with internet
           if has_internet; then
-            log "Internet available — downloading node-onboarding"
+            log "Internet available — downloading node-manager"
             download_binary
-            download_zeroclaw
             setup_complete
             exit 0
           fi
@@ -493,9 +455,8 @@ storage:
           log "AP running. Serving setup UI on port ${LISTEN_PORT}"
           serve_wifi_ui "$WIFI_IFACE"
 
-          log "WiFi configured — downloading node-onboarding"
+          log "WiFi configured — downloading node-manager"
           download_binary
-          download_zeroclaw
           setup_complete
           exit 0
 
@@ -510,8 +471,8 @@ systemd:
         Description=Holo Node — first-boot network setup and binary install
         After=network-online.target
         Wants=network-online.target
-        ConditionPathExists=!/usr/local/bin/node-onboarding
-        Before=node-onboarding.service
+        ConditionPathExists=!/usr/local/bin/node-manager
+        Before=node-manager.service
 
         [Service]
         Type=oneshot
@@ -527,76 +488,78 @@ systemd:
         [Install]
         WantedBy=multi-user.target
 
-    # ── node-onboarding.service ────────────────────────────────────────────────
-    - name: node-onboarding.service
+    # ── node-manager.service ───────────────────────────────────────────────────
+    - name: node-manager.service
       enabled: true
       contents: |
         [Unit]
-        Description=Holo Node Onboarding & Management Server
+        Description=Holo Node Management Server
         After=network-online.target node-setup.service
         Wants=network-online.target
         Requires=node-setup.service
 
         [Service]
         Type=simple
-        ExecStart=/usr/local/bin/node-onboarding
+        ExecStart=/usr/local/bin/node-manager
         Restart=always
         RestartSec=5
         StandardOutput=journal
         StandardError=journal
-        SyslogIdentifier=node-onboarding
+        SyslogIdentifier=node-manager
         NoNewPrivileges=yes
 
         [Install]
         WantedBy=multi-user.target
 
-    # ── zeroclaw-daemon.service ───────────────────────────────────────────────
-    - name: zeroclaw-daemon.service
+    # ── openclaw-daemon.service ───────────────────────────────────────────────
+    # Not enabled by default. node-manager starts this conditionally after
+    # the operator enables the agent during onboarding.
+    - name: openclaw-daemon.service
       contents: |
         [Unit]
-        Description=ZeroClaw AI Agent Daemon
-        After=network-online.target node-onboarding.service
+        Description=OpenClaw AI Agent Daemon
+        After=network-online.target node-manager.service
         Wants=network-online.target
 
         [Service]
         Type=simple
-        ExecStart=/usr/local/bin/zeroclaw --config-dir /etc/zeroclaw daemon
+        ExecStart=/usr/local/bin/openclaw --config-dir /etc/openclaw daemon
         Restart=on-failure
         RestartSec=10
         StandardOutput=journal
         StandardError=journal
-        SyslogIdentifier=zeroclaw-daemon
+        SyslogIdentifier=openclaw-daemon
         Environment=HOME=/root
 
         [Install]
         WantedBy=multi-user.target
 
-    # ── zeroclaw-update.service ───────────────────────────────────────────────
-    - name: zeroclaw-update.service
+    # ── openclaw-update.service ───────────────────────────────────────────────
+    - name: openclaw-update.service
       contents: |
         [Unit]
-        Description=ZeroClaw — check for and apply binary updates
+        Description=OpenClaw — check for and apply binary updates
         After=network-online.target
         Wants=network-online.target
 
         [Service]
         Type=oneshot
-        ExecStart=/usr/local/bin/zeroclaw-update.sh
+        ExecStart=/usr/local/bin/openclaw-update.sh
         StandardOutput=journal
         StandardError=journal
-        SyslogIdentifier=zeroclaw-update
+        SyslogIdentifier=openclaw-update
 
-    # ── zeroclaw-update.timer ─────────────────────────────────────────────────
-    - name: zeroclaw-update.timer
+    # ── openclaw-update.timer ─────────────────────────────────────────────────
+    - name: openclaw-update.timer
       enabled: true
       contents: |
         [Unit]
-        Description=ZeroClaw — hourly update check
+        Description=OpenClaw — hourly update check
 
         [Timer]
         OnBootSec=10min
         OnUnitActiveSec=1h
-        Unit=zeroclaw-update.service
+        Unit=openclaw-update.service
 
         [Install]
         WantedBy=timers.target
