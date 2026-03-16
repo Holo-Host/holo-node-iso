@@ -1,379 +1,153 @@
 # holo-node-iso
 
-Builds the Holo Node operating system image — a customised Fedora CoreOS (FCOS) image that boots directly into the Holo node stack.
+Welcome to the Holo Node! This operating system image allows you to turn your hardware (like a HoloPort or a standard PC) into a dedicated edge node. It automatically installs a customized, secure operating system that boots directly into the Holo node stack.
 
-The image is built using [Butane](https://coreos.github.io/butane/) (which compiles a human-readable YAML config to Ignition JSON) and [coreos-installer](https://coreos.github.io/coreos-installer/) to produce a bootable ISO. The resulting ISO is what node operators flash to their hardware.
-
----
-
-## Table of contents
-
-1. [How it fits into the system](#how-it-fits-into-the-system)
-2. [What's in the image](#whats-in-the-image)
-3. [First-boot flow](#first-boot-flow)
-4. [Prerequisites](#prerequisites)
-5. [Repository structure](#repository-structure)
-6. [Building locally](#building-locally)
-7. [Ignition configuration reference](#ignition-configuration-reference)
-8. [Setting up the GitHub Actions pipeline](#setting-up-the-github-actions-pipeline)
-9. [Shipping a new ISO release](#shipping-a-new-iso-release)
-10. [Relationship between this repo and node-manager](#relationship-between-this-repo-and-node-manager)
-11. [Testing a build](#testing-a-build)
-12. [Troubleshooting](#troubleshooting)
+Whether you want to host applications on the edge or run automated wind-tunnel tests, this guide will walk you through the entire setup process.
 
 ---
 
-## How it fits into the system
+## Table of Contents
 
-```
-holo-host/node-manager               holo-host/holo-node-iso
-        │                                      │
-        │  Rust source + release               │  Butane YAML + build scripts
-        │  pipeline                            │
-        │                                      │
-        │  Publishes binaries:                 │  Produces:
-        │  node-manager-x86_64                 │  holo-node-x86_64.iso
-        │  node-manager-aarch64                │  holo-node-aarch64.iso
-        │                                      │
-        │  ◄── downloaded at first boot ───────┤  (node-setup.sh fetches the
-        │       by node-setup.sh               │   binary on first boot)
-        ▼                                      ▼
-
-                     Node operator
-                     flashes ISO → hardware auto-installs FCOS → reboots
-                     → node-setup.sh runs → downloads node-manager
-                     → operator visits http://<ip>:8080
-                     → completes setup wizard → node is running
-```
-
-Once a node is running, **the node-manager binary updates itself automatically** from `holo-host/node-manager` GitHub Releases. You do not need to build or ship a new ISO to deliver software updates to running nodes. The ISO only needs to be rebuilt when:
-
-- The FCOS base image needs updating (security patches, kernel updates)
-- The Ignition/systemd configuration changes
+1. [What can you do with a Holo Node?](#what-can-you-do-with-a-holo-node)
+2. [Why You Can Relax: Our Security First Approach](#why-you-can-relax-our-security-first-approach)
+3. [Complete Node Setup Guide](#complete-node-setup-guide)
+   * [Part 1: Flashing and Booting](#part-1-flashing-and-booting)
+   * [Part 2: Generating an SSH Key](#part-2-generating-an-ssh-key)
+   * [Part 3: Configuring Your Node & AI Agent](#part-3-configuring-your-node--ai-agent)
+4. [Managing Your Node](#managing-your-node)
+5. [Developer & Build Documentation](#developer--build-documentation)
 
 ---
 
-## What's in the image
+## What can you do with a Holo Node?
 
-| Component | Description |
-|-----------|-------------|
-| Fedora CoreOS (FCOS) | Minimal immutable OS base; automatic OS updates via rpm-ostree |
-| `node-setup.sh` | Inlined bash script; runs once on first boot to download `node-manager`. On ethernet nodes it downloads directly. On WiFi-only nodes it first starts a captive-portal AP to collect credentials. |
-| `node-manager.service` | Permanent systemd service; starts after `node-setup.service` exits |
-| `openclaw-daemon.service` | OpenClaw AI agent service; started by `node-manager` after operator enables it |
-| `openclaw-update.service` / `.timer` | Hourly timer that pulls the latest OpenClaw fork binary to `/usr/local/bin/openclaw` |
-| `podman-auto-update.timer` | Nightly container image refresh via `io.containers.autoupdate=registry` labels |
-| SSH hardening | Root login disabled; password auth disabled; `holo` is the only SSH-accessible user |
+Once your node is installed and running, you can operate it in different modes depending on your goals:
 
-There is no build-time dependency on `node-manager` — the ISO contains no management binary.
+* **Edge Node Mode:** Run and host decentralized applications directly on your hardware at the edge of the network. 
+* **Wind Tunnel Mode:** Use your node as a dedicated testing environment to run performance, stress, and wind-tunnel tests for your own apps before deploying them widely.
+* **OpenClaw AI Agent:** Both modes allow you to enable the OpenClaw AI agent, which you can connect to your preferred AI model and control remotely via chat platforms like Telegram.
 
 ---
 
-## First-boot flow
+## Why You Can Relax: Our Security First Approach
 
-### Ethernet nodes (most common)
+Running a node on your local network might sound intimidating, but we have built the Holo Node with extreme security precautions so you can operate it with total peace of mind:
 
-```
-ISO boots → FCOS auto-installs to internal disk → reboots from disk
-→ node-setup.service starts
-→ node-setup.sh detects internet via ethernet
-→ downloads node-manager from GitHub Releases
-→ node-setup.service exits
-→ node-manager.service starts
-→ operator opens http://<node-ip>:8080 → completes setup
-→ node-setup.service never runs again (binary now exists on disk)
-```
-
-### WiFi-only nodes
-
-```
-ISO boots → FCOS auto-installs to internal disk → reboots from disk
-→ node-setup.service starts
-→ node-setup.sh detects no internet
-→ starts WiFi AP: SSID "HoloNode-Setup", password "holonode"
-→ serves WiFi credentials form at http://192.168.4.1:8080
-→ operator connects phone/laptop to HoloNode-Setup
-→ operator opens http://192.168.4.1:8080
-→ operator enters home WiFi SSID and password → submits
-→ node connects to WiFi, downloads node-manager
-→ node-setup.service exits
-→ node-manager.service starts
-→ operator connects to home network, opens http://<node-ip>:8080
-→ completes setup
-```
+* **Immutable Operating System:** The base OS (Fedora CoreOS) is locked down. Core system files cannot be easily altered by malicious actors.
+* **No Passwords:** Traditional password logins are completely disabled over the network. The only way to access the system remotely is via the highly encrypted SSH key you generate on your own computer.
+* **Root Login Disabled:** Administrator (root) network login is blocked by default. 
+* **Automatic Updates:** The node automatically pulls background security patches and nightly container image refreshes, so you are never left running outdated, vulnerable software.
 
 ---
 
-## Prerequisites
+## Complete Node Setup Guide
 
-### Butane
+This guide is written for everyone. Even if you aren't highly technical, following these steps from start to finish will get your node running and securely connected to your own personal AI assistant.
 
-```bash
-# Linux
-curl -L https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu \
-  -o /usr/local/bin/butane
-chmod +x /usr/local/bin/butane
+### Part 1: Flashing and Booting
 
-# macOS
-brew install butane
-```
+1.  **Download the Installer:** Download the latest edge node installer image (`.iso` file) from our GitHub Releases. *(Make sure to download the `.iso` file, not the source code folder).*
+2.  **Flash to a USB Drive:** You need a USB stick with at least 8GB of space. Use a free tool like [balenaEtcher](https://etcher.balena.io/) or [Rufus](https://rufus.ie/). Open the tool, select the downloaded `.iso` image, select your USB drive, and click Flash. Wait for it to complete.
+3.  **Boot the Device:** Insert the flashed USB stick into your hardware (e.g., your HoloPort or PC). Connect a monitor, a keyboard, and an ethernet cable connected to your internet router. Turn the device on and press `F11` (or your system's boot menu key) repeatedly to boot from the USB drive.
+4.  **Automatic Installation:** The system will automatically install the operating system. No manual interaction is required here. **Important:** When the installation finishes, a password will be displayed on the screen. **Write this password down.** You will need it later. Remove the USB stick and let the system reboot.
+5.  **Find the IP Address:** Once rebooted, the monitor will display an IP address assigned by your router (it usually looks like `192.168.x.x`). Keep this number handy.
+6.  **Open the Setup Interface:** On a separate laptop or PC connected to the same WiFi/network, open a web browser and type in that IP address followed by `:8080`. 
+    * Example: `http://192.168.1.50:8080`
+    * The node will automatically redirect you to the onboarding setup page.
 
-### coreos-installer
+### Part 2: Generating an SSH Key
 
-```bash
-# Linux (via cargo — takes ~3 minutes to compile)
-cargo install coreos-installer
+To securely connect your computer to your new node, you need to generate an "SSH Key." It acts as a highly secure digital handshake.
 
-# Linux (Fedora/RHEL)
-sudo dnf install coreos-installer
-```
+**For Windows Users:**
+1.  Click your Start menu, type **PowerShell**, and open it.
+2.  Type the following command (replace with your actual email) and press Enter:
+    `ssh-keygen -t ed25519 -C "your_email@example.com"`
+3.  The system will ask where to save the key. Press **Enter** to accept the default location.
+4.  It will ask for a passphrase. Leave it blank and press **Enter** twice.
+5.  Type this command to view your new public key:
+    `cat ~/.ssh/id_ed25519.pub`
+6.  A long line of text starting with `ssh-ed25519` will appear. Highlight and copy this entire line.
 
-### curl and jq
+**For Mac / Linux Users:**
+1.  Open the **Terminal** application.
+2.  Type the following command (replace with your actual email) and press Enter:
+    `ssh-keygen -t ed25519 -C "your_email@example.com"`
+3.  Press **Enter** to accept the default file location.
+4.  Press **Enter** twice to skip creating a passphrase.
+5.  Type this command to view your public key:
+    `cat ~/.ssh/id_ed25519.pub`
+6.  Copy the entire output string that begins with `ssh-ed25519`.
 
-```bash
-sudo apt install curl jq   # Debian/Ubuntu
-sudo dnf install curl jq   # Fedora
-brew install curl jq       # macOS
-```
+### Part 3: Configuring Your Node & AI Agent
 
----
+Now that you have your SSH key, return to the setup page in your web browser.
 
-## Repository structure
+1. **Paste your SSH Key:** Paste the key you just copied into the *SSH Public Key* field.
+2. **Choose your Mode:** Give your node a name, and select either **Edge Node Mode** (for hosting apps) or **Wind Tunnel Mode** (for testing apps).
+3. **Choose Your AI Agent:** You can power your OpenClaw AI agent using several different providers. Choose the one that best fits your privacy needs and budget:
+   * **Option A: Ollama (Default, Local, and Private)**
+     Ollama is the default choice because it runs entirely locally on your hardware. Your data remains strictly private and never leaves your network. It is highly recommended for security and privacy. 
+   * **Option B: Google Gemini API (Cloud-based)**
+     Google's AI offers a "No-Billing" Free Tier, which is great for prototyping but has strict usage limitations. If you add billing information, it becomes a paid service with higher quotas. To use it, get an API key from the [Google Cloud Console](https://console.cloud.google.com/) and paste it into the *Gemini API* field.
+   * **Option C: Anthropic Claude (Cloud-based)**
+     A powerful premium cloud model. You will need to create an account at the [Anthropic Console](https://console.anthropic.com/), fund it, generate an API key, and paste it into the configuration field.
+   * **Option D: OpenAI / ChatGPT (Cloud-based)**
+     The industry-standard cloud model. You will need an active, funded account at the [OpenAI Developer Platform](https://platform.openai.com/). Generate an API key and paste it into the configuration field.
+   * **Option E: OpenRouter (Cloud Aggregator)**
+     OpenRouter is an aggregator that lets you access dozens of different AI models (including paid and open-source models) using a single API key. Get your key from [OpenRouter.ai](https://openrouter.ai/) and paste it into the configuration field.
 
-```
-holo-node-iso/
-├── config/
-│   └── node.bu              ← Butane YAML — the human-editable config
-├── scripts/
-│   └── build.sh             ← main build script
-├── .github/
-│   └── workflows/
-│       └── build.yml        ← GitHub Actions: builds ISOs on push/release
-└── README.md
-```
+4. **Connect Your Chat Interface:**
+   Your AI agent needs a way to talk to you. You can connect it to over 15 different messaging platforms. 
 
----
+   **The Default: Telegram**
+   Telegram is our recommended chat interface because it requires no complex network setup. *Note: You must ensure the Telegram CLI (Command Line Interface) is enabled for it to work properly.*
+   * Open the Telegram app and search for **BotFather**.
+   * Send `/newbot` and follow the prompts to name your bot (the username must end in `_bot`).
+   * Copy the **Bot Token** provided and paste it into the *Bot Token* field on the onboarding page.
+   * Search for **userinfobot**, send `/start`, and copy your numeric ID. Paste this into the *Allowed User IDs* field to ensure your bot only talks to you.
+   * *Bonus:* Once running, you can manage your AI directly in Telegram! Type `/models` to see available providers, or `/new` to clear the conversation history and start fresh.
 
-## Building locally
+   **Alternative Chat Options:**
+   If you prefer not to use Telegram, the underlying ZeroClaw architecture supports many other platforms. They are categorized below by setup difficulty:
 
-### Quick start
+   * **Easy Setup (No public IP or port forwarding required):**
+     These channels use background polling or websockets and work out of the box, just like Telegram.
+     * **Discord:** Requires a Bot Token.
+     * **Slack:** Requires a Bot Token.
+     * **Matrix:** Highly secure. Supports End-to-End Encryption (E2EE).
+     * **WhatsApp (Web Mode):** Connects via a QR-code style session.
+     * **Signal:** Connects via a local HTTP bridge.
+     * **iMessage:** Connects locally via an AppleScript bridge.
+     * **Others:** Mattermost, Email (IMAP/SMTP), IRC, DingTalk, QQ, and Nostr.
 
-```bash
-git clone https://github.com/holo-host/holo-node-iso
-cd holo-node-iso
-chmod +x scripts/build.sh
-./scripts/build.sh
-```
+   * **Advanced Setup (Requires a public IP / Webhook callback):**
+     These channels require your node to have a public-facing HTTPS address so the chat service can send data back to you.
+     * **WhatsApp (Cloud API Mode):** Requires a verified Meta developer account.
+     * **Nextcloud Talk:** Requires a dedicated `/nextcloud-talk` webhook endpoint.
+     * **Lark / Feishu (Webhook Mode):** Requires an app ID and callback URL.
+     * **Linq:** Requires an API token and a `/linq` webhook endpoint.
 
-This will:
-1. Compile `config/node.bu` → `ignition.json` using Butane
-2. Download the latest stable FCOS ISO for x86_64
-3. Embed the Ignition config into the ISO using coreos-installer
-4. Output `holo-node-x86_64.iso` in the project root
+   *Security Note: No matter which channel you choose, you must configure the "Allowlist" (e.g., `allowed_users`, `allowed_numbers`, or `allowed_contacts`) with your specific username or ID. If left blank, the bot will deny all incoming messages.*
 
-Note: `node-manager` is **not** fetched at build time. It is downloaded by `node-setup.sh` on the node's first boot.
-
-### Building for ARM (aarch64)
-
-```bash
-ARCH=aarch64 ./scripts/build.sh
-# Outputs holo-node-aarch64.iso
-```
-
-### `build.sh` in full
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-ARCH="${ARCH:-x86_64}"
-FCOS_STREAM="stable"
-OUTPUT="holo-node-${ARCH}.iso"
-CONFIG_DIR="$(cd "$(dirname "$0")/../config" && pwd)"
-
-echo "==> Compiling Butane config"
-butane --strict "${CONFIG_DIR}/node.bu" > ignition.json
-
-echo "==> Downloading FCOS ${FCOS_STREAM} base image (${ARCH})"
-coreos-installer download \
-    --stream "$FCOS_STREAM" \
-    --architecture "$ARCH" \
-    --format iso \
-    --decompress
-
-FCOS_ISO=$(ls fedora-coreos-*.iso 2>/dev/null | head -1)
-if [ -z "$FCOS_ISO" ]; then
-    echo "ERROR: Could not find downloaded FCOS ISO"
-    exit 1
-fi
-
-echo "==> Embedding Ignition config into ISO"
-coreos-installer iso customize \
-    --dest-ignition ignition.json \
-    --output "$OUTPUT" \
-    "$FCOS_ISO"
-
-rm -f "$FCOS_ISO" ignition.json
-echo "==> Done! Output: ${OUTPUT}"
-```
+5. **Finish Setup:** Submit the onboarding form. Your node is now fully configured and your AI is ready to chat!
 
 ---
 
-## Ignition configuration reference
+## Managing Your Node
 
-`config/node.bu` defines everything about how the node is configured at first boot.
+Once onboarding is complete, you can monitor and adjust your node's settings at any time. 
 
-### Users
+Simply open your web browser and navigate back to your node's IP address:
+* `http://192.168.1.50:8080`
 
-```yaml
-passwd:
-  users:
-    - name: holo
-      shell: /bin/bash
-      home_dir: /home/holo
-      groups:
-        - systemd-journal
-```
-
-The `holo` user is the only SSH-accessible account. No SSH keys are baked in — the operator adds them via the management UI after setup. To add a permanent recovery key that the UI cannot remove, add it to `ssh_authorized_keys` here.
-
-### node-setup.sh
-
-The first-boot script is inlined directly in `node.bu` via `contents.inline`. It is a bash script, not a binary — this is intentional. Any binary large enough to be useful would exceed the 262KB initramfs size limit imposed by `coreos-installer iso customize`. A bash script compresses to a few KB.
-
-The script's only job is to download `node-manager` from the latest GitHub Release and install it to `/usr/local/bin/node-manager`. It runs exactly once, gated by `ConditionPathExists=!/usr/local/bin/node-manager` in the systemd unit.
-
-### systemd units
-
-| Unit | Type | Enabled | Description |
-|------|------|---------|-------------|
-| `node-setup.service` | oneshot | yes | First-boot download of `node-manager` |
-| `node-manager.service` | simple | yes | Permanent management server on :8080 |
-| `openclaw-daemon.service` | simple | no | OpenClaw AI agent; started by node-manager |
-| `openclaw-update.service` | oneshot | no | Pulls latest OpenClaw fork binary |
-| `openclaw-update.timer` | timer | yes | Triggers openclaw-update.service every hour |
-| `podman-auto-update.timer` | timer | yes | Nightly container image refresh |
+The system will recognize that you have already onboarded and will automatically redirect you to your management dashboard. From this dashboard, you can view system health, deploy apps to the edge, trigger wind-tunnel tests, and update your AI agent configurations. 
 
 ---
 
-## Setting up the GitHub Actions pipeline
+## Developer & Build Documentation
 
-The `.github/workflows/build.yml` workflow builds ISOs automatically on push to `main` and on version tags. It requires no secrets — the build is entirely public tooling (Butane + coreos-installer).
+*Note for contributors: If you are looking to modify the underlying Fedora CoreOS image, compile the Butane configurations, or test the GitHub Actions pipeline, please refer to our detailed developer documentation.*
 
-To publish a release ISO as a GitHub Release artifact, create a version tag:
-
-```bash
-git tag v1.2.0
-git push origin v1.2.0
-```
-
-GitHub Actions will build both architectures and attach them to the release.
-
----
-
-## Shipping a new ISO release
-
-Rebuild and ship a new ISO when:
-
-- The FCOS base image has had significant security patches and you want to bake those in for fresh installs (running nodes update themselves via rpm-ostree; this is for new hardware)
-- The `node.bu` Ignition config has changed (new systemd units, updated `node-setup.sh`, changed SSH hardening)
-
-**Running nodes do not need a new ISO** — `node-manager` self-updates from GitHub Releases, and `openclaw-update.timer` updates the OpenClaw fork binary hourly.
-
----
-
-## Relationship between this repo and node-manager
-
-There is no build-time dependency — the ISO contains no `node-manager` binary.
-
-```
-holo-node-iso  ──fetches at first boot──►  holo-host/node-manager
-               (via node-setup.sh)          (latest GitHub Release)
-```
-
-After the initial download, `node-manager` updates itself automatically by polling GitHub Releases every hour. The ISO is not involved in updates after first boot.
-
-`node-setup.sh` always fetches the latest release of `node-manager`. To pin to a specific version, modify the `download_binary` function in `node-setup.sh` within `config/node.bu`:
-
-```bash
-# Replace /releases/latest with /releases/tags/v5.1.0:
-"https://api.github.com/repos/${MANAGER_REPO}/releases/tags/v5.1.0"
-```
-
-For most purposes pinning is unnecessary — a node running an older binary will self-update within ~60 seconds of coming online.
-
----
-
-## Testing a build
-
-### Validate the Butane config without building
-
-```bash
-butane --strict --check config/node.bu
-```
-
-### Inspect the generated Ignition JSON
-
-```bash
-butane --strict config/node.bu | python3 -m json.tool | less
-```
-
-Check the `passwd`, `storage`, and `systemd` sections. Confirm `node-setup.sh` is present under `storage.files`.
-
-### Full end-to-end test in a VM
-
-```bash
-# Create a virtual disk to install to
-qemu-img create -f qcow2 test-disk.img 20G
-
-# Build the ISO
-./scripts/build.sh
-
-# Boot
-qemu-system-x86_64 \
-  -m 4096 \
-  -cpu host \
-  -enable-kvm \
-  -drive file=holo-node-x86_64.iso,format=raw,if=ide,media=cdrom \
-  -drive file=test-disk.img,format=qcow2,if=virtio \
-  -boot d \
-  -nographic \
-  -serial stdio \
-  -net user,hostfwd=tcp::8080-:8080
-```
-
-The ISO auto-installs FCOS to `test-disk.img` and reboots. After reboot, `node-setup.sh` downloads `node-manager` and starts the management server. Open `http://localhost:8080` to verify the setup UI.
-
----
-
-## Troubleshooting
-
-### `Error: Compressed initramfs is too large`
-
-The Ignition config is too large for the live ISO's 262KB initramfs limit. This happens if you try to embed a binary in `node.bu` via `contents.local`. The correct approach is to keep `node.bu` binary-free and use `node-setup.sh` to download binaries at first boot. Do not add `contents.local` entries pointing to large files.
-
-### The setup page isn't reachable after install
-
-1. Confirm the node rebooted from its internal disk (not still running the live ISO)
-2. `systemctl status node-setup.service` — did it complete successfully?
-3. `ls -lh /usr/local/bin/node-manager` — was the binary downloaded?
-4. `systemctl status node-manager.service` — is it running?
-5. `ip addr` — what is the node's IP?
-6. `firewall-cmd --list-all` — is port 8080 open?
-7. `journalctl -u node-setup.service` and `journalctl -u node-manager.service` for full logs
-
-### `node-setup.sh` fails to download node-manager
-
-Check `journalctl -u node-setup.service`. Common causes:
-
-- No internet connectivity at first boot — confirm ethernet is plugged in, or complete the WiFi AP flow
-- GitHub API rate limit — unlikely for a single node, but possible in CI/test environments
-- Firewall blocking outbound HTTPS — ensure port 443 is open
-
-### node-manager won't start
-
-```bash
-journalctl -u node-manager.service -n 50 --no-pager
-```
-
-If the binary exists but the service fails immediately, check that it is executable (`chmod +x /usr/local/bin/node-manager`) and that it is the correct architecture (`file /usr/local/bin/node-manager`).
+* **[Building Locally & Architecture (`docs/development.md`)](docs/development.md):** Instructions on using `butane` and `coreos-installer`, boot flow explanations, and systemd unit configs.
+* **[Advanced Channel Configs (`docs/channels.md`)](docs/channels.md):** Detailed TOML configuration syntax for setting up Discord, Matrix, Signal, Webhooks, and other chat providers via ZeroClaw.
