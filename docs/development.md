@@ -127,22 +127,6 @@ yes
 
 Permanent management server on port 8080.
 
-`openclaw-daemon.service`
-
-simple
-
-no
-
-OpenClaw AI agent; started by node-manager.
-
-`openclaw-update.timer`
-
-timer
-
-yes
-
-Triggers OpenClaw binary updates every hour.
-
 `podman-auto-update.timer`
 
 timer

@@ -23,16 +23,10 @@ storage:
     - path: /etc/node-manager
       mode: 0700
 
-    - path: /etc/openclaw
-      mode: 0700
-
     - path: /etc/containers/systemd
       mode: 0755
 
     - path: /var/lib/edgenode
-      mode: 0755
-
-    - path: /var/lib/openclaw/workspace
       mode: 0755
 
     - path: /usr/local/share/holo-node
@@ -51,6 +45,15 @@ storage:
           AllowUsers holo
           MaxAuthTries 3
           LoginGraceTime 30
+
+    # ── Restricted sudo for the holo user ──────────────────────────────────────
+    # Allows SSH operators to manage containers and services without full root.
+    # NOPASSWD is required because SSH password auth is disabled (key-only).
+    - path: /etc/sudoers.d/holo-restricted
+      mode: 0440
+      contents:
+        inline: |
+          holo ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/bin/podman, /usr/bin/journalctl
 
     # ── WiFi setup form HTML ───────────────────────────────────────────────────
     - path: /usr/local/share/holo-node/wifi-form.html
@@ -143,77 +146,6 @@ storage:
             <strong>http://&lt;node-ip&gt;:8080</strong> to complete setup.
             </div>
           </div></body></html>
-
-    # ── openclaw-update.sh ─────────────────────────────────────────────────────
-    # This file is the initial version written to disk by the ISO.
-    # node-manager rewrites the fork config block on every startup via
-    # patch_openclaw_update_script(), so manual edits to that block will be
-    # overwritten. Edit the fork config in node-manager's OPENCLAW_FORKS
-    # constant instead.
-    - path: /usr/local/bin/openclaw-update.sh
-      mode: 0755
-      contents:
-        inline: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          # ── Fork config — managed by node-manager; do not edit manually ──────
-          OPENCLAW_FORK_ID="zeroclaw"
-          OPENCLAW_REPO="zeroclaw-labs/zeroclaw"
-          OPENCLAW_ASSET_PREFIX="zeroclaw"     # asset = ${OPENCLAW_ASSET_PREFIX}-${triple}.tar.gz
-          OPENCLAW_BINARY_NAME="zeroclaw"      # name of the binary inside the tar
-          # ─────────────────────────────────────────────────────────────────────
-
-          OPENCLAW_BIN="/usr/local/bin/openclaw"
-          LOG="[openclaw-update]"
-
-          log() { echo "$LOG $*"; }
-
-          arch=$(uname -m)
-          if [ "$arch" = "aarch64" ]; then
-            triple="aarch64-unknown-linux-gnu"
-          else
-            triple="x86_64-unknown-linux-gnu"
-          fi
-          asset_name="${OPENCLAW_ASSET_PREFIX}-${triple}.tar.gz"
-
-          log "Checking for ${OPENCLAW_FORK_ID} releases..."
-          releases_json=$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "User-Agent: holo-node-manager" \
-            "https://api.github.com/repos/${OPENCLAW_REPO}/releases")
-
-          url=$(echo "$releases_json" | \
-            grep -o '"browser_download_url":"[^"]*'"${asset_name}"'[^"]*"' | \
-            head -n 1 | \
-            grep -o 'https://[^"]*')
-
-          if [ -z "$url" ]; then
-            log "ERROR: Could not find asset ${asset_name} in recent releases"
-            exit 1
-          fi
-
-          latest_tag=$(echo "$url" | grep -o 'v[0-9][^/]*')
-
-          if [ -x "$OPENCLAW_BIN" ]; then
-            installed=$("$OPENCLAW_BIN" --version 2>/dev/null | grep -o 'v[0-9][^ ]*' || echo "unknown")
-            if [ "$installed" = "$latest_tag" ]; then
-              log "Already up to date: $installed"
-              exit 0
-            fi
-            log "Updating ${OPENCLAW_FORK_ID}: $installed -> $latest_tag"
-          else
-            log "${OPENCLAW_FORK_ID} not installed, installing $latest_tag"
-          fi
-
-          log "Downloading from: $url"
-          tmp_dir=$(mktemp -d)
-          curl -fsSL "$url" -o "${tmp_dir}/${asset_name}"
-          tar -xzf "${tmp_dir}/${asset_name}" -C "$tmp_dir"
-          install -m 0755 "${tmp_dir}/${OPENCLAW_BINARY_NAME}" "${OPENCLAW_BIN}.tmp"
-          mv "${OPENCLAW_BIN}.tmp" "$OPENCLAW_BIN"
-          rm -rf "$tmp_dir"
-          log "${OPENCLAW_FORK_ID} updated to $latest_tag"
 
     # ── node-setup.sh ──────────────────────────────────────────────────────────
     - path: /usr/local/bin/node-setup.sh
@@ -510,59 +442,6 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
-
-    # ── openclaw-daemon.service ───────────────────────────────────────────────
-    # Not enabled by default. node-manager starts this conditionally after
-    # the operator enables the agent during onboarding.
-    - name: openclaw-daemon.service
-      contents: |
-        [Unit]
-        Description=OpenClaw AI Agent Daemon
-        After=network-online.target node-manager.service
-        Wants=network-online.target
-
-        [Service]
-        Type=simple
-        ExecStart=/usr/local/bin/openclaw --config-dir /etc/openclaw daemon
-        Restart=on-failure
-        RestartSec=10
-        StandardOutput=journal
-        StandardError=journal
-        SyslogIdentifier=openclaw-daemon
-        Environment=HOME=/root
-
-        [Install]
-        WantedBy=multi-user.target
-
-    # ── openclaw-update.service ───────────────────────────────────────────────
-    - name: openclaw-update.service
-      contents: |
-        [Unit]
-        Description=OpenClaw — check for and apply binary updates
-        After=network-online.target
-        Wants=network-online.target
-
-        [Service]
-        Type=oneshot
-        ExecStart=/usr/local/bin/openclaw-update.sh
-        StandardOutput=journal
-        StandardError=journal
-        SyslogIdentifier=openclaw-update
-
-    # ── openclaw-update.timer ─────────────────────────────────────────────────
-    - name: openclaw-update.timer
-      enabled: true
-      contents: |
-        [Unit]
-        Description=OpenClaw — hourly update check
-
-        [Timer]
-        OnBootSec=10min
-        OnUnitActiveSec=1h
-        Unit=openclaw-update.service
-
-        [Install]
-        WantedBy=timers.target
 
     # ── podman-auto-update.timer ───────────────────────────────────────────────
     - name: podman-auto-update.timer
