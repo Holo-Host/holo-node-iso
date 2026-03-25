@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   release:
-    types: [published]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -94,7 +95,7 @@ jobs:
           retention-days: 30
 
       - name: Attach to GitHub Release
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: holo-node-${{ matrix.arch }}.iso
