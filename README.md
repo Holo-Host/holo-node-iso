@@ -16,7 +16,9 @@ Whether you want to host applications on the edge, secure a private Moss group, 
    * [Part 2: Generating an SSH Key](#part-2-generating-an-ssh-key)
    * [Part 3: Configuring Your Node](#part-3-configuring-your-node)
 5. [Managing Your Node](#managing-your-node)
-6. [Developer & Build Documentation](#developer--build-documentation)
+6. [Verifying Wind Tunnel Mode](#verifying-wind-tunnel-mode)
+7. [Troubleshooting](#troubleshooting)
+8. [Developer & Build Documentation](#developer--build-documentation)
 
 ---
 
@@ -45,7 +47,7 @@ Here is why you need a dedicated Edge Node for your peer-to-peer applications (l
 Once your node is installed and running, you can operate it in different modes depending on your goals:
 
 * **Edge Node Mode:** Run and host decentralized applications directly on your hardware at the edge of the network. This acts as the always-on backbone for your peer-to-peer Moss hApps.
-* **Wind Tunnel Mode:** Use your node as a dedicated testing environment to run performance, stress, and wind-tunnel tests for your own apps before deploying them widely.
+* **Wind Tunnel Mode:** Use your node as a dedicated stress-testing participant in the Holochain network. The node registers itself as a Nomad client and runs continuous performance tests.
 
 ---
 
@@ -135,6 +137,97 @@ The system will recognize that you have already onboarded and will automatically
 * Deploy apps to the edge
 * Trigger wind-tunnel tests
 * Update your AI agent configurations
+
+---
+
+## 🌬️ Verifying Wind Tunnel Mode
+
+When your node is set up in Wind Tunnel mode, it registers itself as a Nomad client with the Holochain test network. You can confirm it is active and reporting correctly in two ways.
+
+### Check the public status dashboard
+
+Visit **[https://wind-tunnel-runner-status.holochain.org/](https://wind-tunnel-runner-status.holochain.org/)** in any browser.
+
+Your node will appear listed under the name **`nomad-client-<your-node-name>`**. For example, if you named your node `rob-test-1` during setup, look for `nomad-client-rob-test-1` in the list. If your node appears there and shows as active, everything is working correctly.
+
+### Check the service on the node directly
+
+SSH into your node and run:
+
+```bash
+# Check the service is active
+systemctl status wind-tunnel.service
+
+# View the last 50 lines of logs
+journalctl -u wind-tunnel.service -n 50
+```
+
+In the logs, look for lines containing `node registration complete` — that confirms the node has successfully connected to the Holochain test network.
+
+---
+
+## 🔧 Troubleshooting
+
+### "I ran `podman ps` over SSH and see no containers"
+
+This is expected behaviour and does **not** mean something is broken.
+
+The node runs containers as a system-level service (under root), not as the `holo` user. When you SSH in as `holo` and run plain `podman ps`, you are only seeing containers in the `holo` user's own rootless Podman namespace — which will always be empty.
+
+To see the system containers, always use `sudo`:
+
+```bash
+sudo podman ps
+```
+
+You should see the `wind-tunnel` (or `edgenode`) container listed as `Up`. The `holo` user has the necessary `sudo` permissions for `podman` built in, so this command will work without any extra configuration.
+
+### "My node doesn't appear on the Wind Tunnel status dashboard"
+
+First, confirm the container is actually running:
+
+```bash
+sudo podman ps
+systemctl status wind-tunnel.service
+```
+
+If the service shows `active (running)` and `sudo podman ps` shows the `wind-tunnel` container, check the logs for the registration confirmation:
+
+```bash
+journalctl -u wind-tunnel.service -n 50
+```
+
+Look for `node registration complete`. If you see it, your node is connected — wait a minute or two and refresh the dashboard. If you do **not** see it, check for network connectivity issues (the node needs outbound internet access on the port used by Nomad).
+
+Also double-check the name you are searching for on the dashboard. The dashboard name is always **`nomad-client-`** followed by whatever you entered as your node name during setup. A node named `my-node` will appear as `nomad-client-my-node`.
+
+### "The wind-tunnel service failed to start"
+
+Run the following to get detailed error output:
+
+```bash
+systemctl status wind-tunnel.service
+journalctl -u wind-tunnel.service -n 100
+```
+
+Common causes:
+- **Image not yet pulled** — the container image may still be downloading on first boot. Wait a minute and try `systemctl restart wind-tunnel.service`.
+- **edgenode service still running** — both modes share network ports and cannot run simultaneously. Stop edgenode first: `systemctl stop edgenode.service`, then `systemctl start wind-tunnel.service`.
+- **Network not available** — confirm the node has internet access before the container can register.
+
+### "I need to switch modes after setup"
+
+From the management dashboard (`http://<node-ip>:8080`), use the Hardware Mode selector to switch between EdgeNode and Wind Tunnel. Alternatively, over SSH:
+
+```bash
+# Switch to Wind Tunnel
+systemctl stop edgenode.service
+systemctl start wind-tunnel.service
+
+# Switch back to EdgeNode
+systemctl stop wind-tunnel.service
+systemctl start edgenode.service
+```
 
 ---
 
