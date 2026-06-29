@@ -72,16 +72,23 @@ This guide is written for everyone. Even if you aren't highly technical, followi
 1. **Download the Installer:** Download the latest edge node installer image (`.iso` file) from our [GitHub Releases](../../releases). *(Make sure to download the `.iso` file, not the source code folder).*
 2. **Flash to a USB Drive:** You need a USB stick with at least 8GB of space. Use a free tool like [balenaEtcher](https://etcher.balena.io/) or [Rufus](https://rufus.ie/). Open the tool, select the downloaded `.iso` image, select your USB drive, and click **Flash**. Wait for it to complete.
 3. **Boot the Device:** Insert the flashed USB stick into your hardware (e.g., your HoloPort or PC). Connect a monitor, a keyboard, and an ethernet cable connected to your internet router. Turn the device on and press **F11** (or your system's boot menu key) repeatedly to boot from the USB drive.
-4. **Automatic Installation:** The system will automatically install the operating system. No manual interaction is required here.
+4. **Confirm the Install Target:** The screen will show which hard drive Holo Node OS will be installed on (device name, model, and size), along with a warning that **all data on that drive will be permanently erased**.
+
+   - Review the disk details carefully to make sure it is the correct drive (not your USB installer stick).
+   - Type **WIPE** and press **Enter** to begin installation.
+   - To cancel, press **Ctrl+C** or type anything other than `WIPE`. The system will stop without modifying your disk, and you can troubleshoot from the live shell.
 
    > **Important:** When the installation finishes, a password will be displayed on the screen. **Write this password down.** You will need it later. Remove the USB stick and let the system reboot.
 
-5. **Find the IP Address:** Once rebooted, the monitor will display an IP address assigned by your router (it usually looks like `192.168.x.x`). Keep this number handy.
-6. **Open the Setup Interface:** On a separate laptop or PC connected to the same WiFi/network, open a web browser and type in that IP address followed by `:8080`.
+5. **Open the Setup Interface:** On a separate laptop or PC connected to the same WiFi/network, open a web browser and go to:
 
-   Example: `http://192.168.1.50:8080`
+   `http://holo.local:8080`
 
-   The node will automatically redirect you to the onboarding setup page.
+   The node advertises itself on your local network via mDNS, so you do not need to look up its IP address. The node will automatically redirect you to the onboarding setup page.
+
+   > **Fallback:** If `holo.local` does not resolve (some corporate networks block mDNS), the monitor will display the node's IP address assigned by your router (usually `192.168.x.x`). Use `http://<node-ip>:8080` instead.
+
+   > **Note:** After onboarding, if you chose a custom node name during setup, the local address may change to `http://<node-name>.local:8080`.
 
 ### Part 2: Generating an SSH Key
 
@@ -129,7 +136,7 @@ Now that you have your SSH key, return to the setup page in your web browser.
 
 ## 💻 Managing Your Node
 
-Once onboarding is complete, you can monitor and adjust your node's settings at any time. Simply open your web browser and navigate back to your node's IP address (e.g., `http://192.168.1.50:8080`).
+Once onboarding is complete, you can monitor and adjust your node's settings at any time. Simply open your web browser and navigate to `http://holo.local:8080` (or `http://<node-name>.local:8080` if you set a custom name during onboarding). If mDNS is unavailable on your network, use the node's IP address instead (e.g., `http://192.168.1.50:8080`).
 
 The system will recognize that you have already onboarded and will automatically redirect you to your management dashboard. From this dashboard, you can:
 

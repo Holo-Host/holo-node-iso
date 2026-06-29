@@ -24,11 +24,70 @@ storage:
             # Found it
             DISK="/dev/${name}"
             echo "Detected install target: $DISK"
-            echo "dest-device: $DISK" >> /etc/coreos/installer.d/0001-disk.yaml
+            echo "$DISK" > /run/holo-install-target
             exit 0
           done
 
           echo "ERROR: No suitable install disk found"
+          exit 1
+
+    - path: /usr/local/bin/confirm-install.sh
+      mode: 0755
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          TARGET_FILE=/run/holo-install-target
+
+          if [ ! -f "$TARGET_FILE" ]; then
+            echo "ERROR: No install target detected (missing $TARGET_FILE)"
+            exit 1
+          fi
+
+          DISK=$(cat "$TARGET_FILE")
+          name="${DISK#/dev/}"
+
+          SIZE=$(lsblk -dn -o SIZE "$DISK" 2>/dev/null || echo "unknown")
+          MODEL=$(tr -d ' ' < "/sys/block/${name}/device/model" 2>/dev/null || echo "unknown")
+          [ -n "$MODEL" ] || MODEL="unknown"
+
+          exec </dev/tty0 >/dev/tty0 2>&1
+
+          echo
+          echo "============================================================"
+          echo "  WARNING: ALL DATA ON THE SELECTED DISK WILL BE ERASED"
+          echo "============================================================"
+          echo
+          echo "  Holo Node OS will be installed to:"
+          echo
+          echo "    Device:  $DISK"
+          echo "    Model:   $MODEL"
+          echo "    Size:    $SIZE"
+          echo
+          echo "  This action cannot be undone."
+          echo
+          echo "  Type WIPE and press Enter to continue."
+          echo "  Press Ctrl+C or type anything else to cancel."
+          echo "============================================================"
+          echo
+
+          if ! read -r response; then
+            echo
+            echo "Installation cancelled."
+            systemctl mask coreos-installer.service
+            exit 1
+          fi
+
+          if [ "$response" = "WIPE" ]; then
+            echo "dest-device: $DISK" > /etc/coreos/installer.d/0001-disk.yaml
+            systemctl start coreos-installer.service
+            exit 0
+          fi
+
+          echo
+          echo "Installation cancelled."
+          systemctl mask coreos-installer.service
           exit 1
 
 systemd:
@@ -40,12 +99,30 @@ systemd:
         Description=Detect install target disk
         DefaultDependencies=no
         After=basic.target
-        Before=coreos-installer.service
+        Before=coreos-installer-confirm.service
 
         [Service]
         Type=oneshot
         RemainAfterExit=yes
         ExecStart=/usr/local/bin/detect-disk.sh
+
+        [Install]
+        WantedBy=coreos-installer-pre.target
+
+    - name: coreos-installer-confirm.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Confirm install target disk before wiping
+        DefaultDependencies=no
+        After=coreos-installer-detect-disk.service
+        Before=coreos-installer.service
+        Requires=coreos-installer-detect-disk.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/local/bin/confirm-install.sh
 
         [Install]
         WantedBy=coreos-installer-pre.target

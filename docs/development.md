@@ -137,6 +137,18 @@ Nightly container image refresh.
 
 ----------
 
+## Live Install Boot Flow
+
+When the customized ISO boots, the live environment (`config/live.bu`) runs three steps before writing to disk:
+
+1. **Detect** — `detect-disk.sh` finds the first non-removable internal disk and writes its path to `/run/holo-install-target`.
+2. **Confirm** — `confirm-install.sh` displays the target disk (device, model, size) on the console and waits for the user to type `WIPE`.
+3. **Install** — Only after confirmation, `dest-device` is written to `/etc/coreos/installer.d/` and `coreos-installer` wipes and installs FCOS.
+
+On a physical machine the prompt appears on the connected monitor (`/dev/tty0`). In QEMU with `-nographic -serial stdio`, use the serial console to interact with the prompt.
+
+----------
+
 ## Testing a Build
 
 You can validate your Butane configuration without running a full build:
@@ -145,6 +157,7 @@ Bash
 
 ```
 butane --strict --check config/node.bu
+butane --strict --check config/live.bu
 
 ```
 
