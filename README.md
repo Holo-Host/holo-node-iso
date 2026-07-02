@@ -222,6 +222,27 @@ Common causes:
 - **edgenode service still running** — both modes share network ports and cannot run simultaneously. Stop edgenode first: `systemctl stop edgenode.service`, then `systemctl start wind-tunnel.service`.
 - **Network not available** — confirm the node has internet access before the container can register.
 
+### "Container doesn't restart after reboot / power cycle"
+
+If the wind-tunnel or edgenode container was running before a reboot but is missing afterward:
+
+```bash
+sudo podman ps
+systemctl status wind-tunnel.service   # or edgenode.service
+grep -A2 '\[Install\]' /etc/containers/systemd/*.container
+```
+
+Use `sudo podman ps` — containers run as rootful system services, not in the `holo` user's Podman namespace.
+
+Only the active hardware mode should have an `[Install]` section in its `.container` file. If both do, update node-manager to the latest release (which fixes Quadlet autostart). The ISO ensures `network-online.target` is active at boot so containers can pull images and register once node-manager has written the correct Quadlet files.
+
+Immediate workaround:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart wind-tunnel.service   # or edgenode.service
+```
+
 ### "I need to switch modes after setup"
 
 From the management dashboard (`http://<node-ip>:8080`), use the Hardware Mode selector to switch between EdgeNode and Wind Tunnel. Alternatively, over SSH:

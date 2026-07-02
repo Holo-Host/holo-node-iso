@@ -52,7 +52,15 @@ storage:
           MODEL=$(tr -d ' ' < "/sys/block/${name}/device/model" 2>/dev/null || echo "unknown")
           [ -n "$MODEL" ] || MODEL="unknown"
 
-          exec </dev/tty0 >/dev/tty0 2>&1
+          # /dev/console shows output but often cannot read keyboard input from
+          # UTM or a physical monitor in this early-boot service. Attach to the
+          # active virtual terminal instead.
+          console_tty=/dev/tty0
+          if vt=$(fgconsole 2>/dev/null) && [ -c "/dev/tty${vt}" ]; then
+            console_tty="/dev/tty${vt}"
+          fi
+          exec <"$console_tty" >"$console_tty" 2>&1
+          stty sane 2>/dev/null || true
 
           echo
           echo "============================================================"
@@ -115,7 +123,7 @@ systemd:
         [Unit]
         Description=Confirm install target disk before wiping
         DefaultDependencies=no
-        After=coreos-installer-detect-disk.service
+        After=systemd-vconsole-setup.service coreos-installer-detect-disk.service
         Before=coreos-installer.service
         Requires=coreos-installer-detect-disk.service
 

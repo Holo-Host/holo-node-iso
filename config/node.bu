@@ -421,6 +421,16 @@ storage:
 # ── systemd units ─────────────────────────────────────────────────────────────
 systemd:
   units:
+    # ── network-online.target ──────────────────────────────────────────────────
+    # Required for Podman Quadlet containers to autostart after reboot on FCOS.
+    - name: network-online.target
+      enabled: true
+      dropins:
+        - name: 10-wanted-by-multi-user.conf
+          contents: |
+            [Install]
+            WantedBy=multi-user.target
+
     # ── node-setup.service ─────────────────────────────────────────────────────
     - name: node-setup.service
       enabled: true
@@ -447,14 +457,15 @@ systemd:
         WantedBy=multi-user.target
 
     # ── node-manager.service ───────────────────────────────────────────────────
+    # Wants (not Requires) node-setup: setup is skipped after first boot when the
+    # binary exists, and Requires= would block this unit on every later boot.
     - name: node-manager.service
       enabled: true
       contents: |
         [Unit]
         Description=Holo Node Management Server
         After=network-online.target node-setup.service
-        Wants=network-online.target
-        Requires=node-setup.service
+        Wants=network-online.target node-setup.service
 
         [Service]
         Type=simple

@@ -111,6 +111,14 @@ The `node-setup.sh` first-boot script is inlined directly in `node.bu`. We use a
 
 **Description**
 
+`network-online.target`
+
+target
+
+yes (drop-in)
+
+Ensures network is online before Quadlet containers autostart.
+
 `node-setup.service`
 
 oneshot
@@ -135,6 +143,8 @@ yes
 
 Nightly container image refresh.
 
+Podman Quadlet container units (`wind-tunnel.service`, `edgenode.service`) are written to `/etc/containers/systemd/` by node-manager at onboarding. They depend on `network-online.target` being active at boot so image pulls and network registration succeed after a reboot.
+
 ----------
 
 ## Live Install Boot Flow
@@ -145,7 +155,7 @@ When the customized ISO boots, the live environment (`config/live.bu`) runs thre
 2. **Confirm** — `confirm-install.sh` displays the target disk (device, model, size) on the console and waits for the user to type `WIPE`.
 3. **Install** — Only after confirmation, `dest-device` is written to `/etc/coreos/installer.d/` and `coreos-installer` wipes and installs FCOS.
 
-On a physical machine the prompt appears on the connected monitor (`/dev/tty0`). In QEMU with `-nographic -serial stdio`, use the serial console to interact with the prompt.
+On a physical machine, UTM, or QEMU with a graphical console, the prompt appears on the active virtual terminal (`/dev/tty0` or the foreground VT from `fgconsole`). `confirm-install.sh` attaches stdin/stdout there directly so keyboard input works; it does not use systemd TTY allocation. With `-nographic -serial stdio`, the serial console is a separate path and may not receive the prompt unless the live kernel `console=` argument includes that serial port.
 
 ----------
 
