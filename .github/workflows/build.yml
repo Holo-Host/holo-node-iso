@@ -3,7 +3,6 @@ name: Build ISO
 on:
   push:
     branches: [main]
-  release:
     tags:
       - 'v*'
   workflow_dispatch:
