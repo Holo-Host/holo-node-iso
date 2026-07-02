@@ -147,18 +147,6 @@ Podman Quadlet container units (`wind-tunnel.service`, `edgenode.service`) are w
 
 ----------
 
-## Live Install Boot Flow
-
-When the customized ISO boots, the live environment (`config/live.bu`) runs three steps before writing to disk:
-
-1. **Detect** — `detect-disk.sh` finds the first non-removable internal disk and writes its path to `/run/holo-install-target`.
-2. **Confirm** — `confirm-install.sh` displays the target disk (device, model, size) on the console and waits for the user to type `WIPE`.
-3. **Install** — Only after confirmation, `dest-device` is written to `/etc/coreos/installer.d/` and `coreos-installer` wipes and installs FCOS.
-
-On a physical machine, UTM, or QEMU with a graphical console, the prompt appears on the active virtual terminal (`/dev/tty0` or the foreground VT from `fgconsole`). `confirm-install.sh` attaches stdin/stdout there directly so keyboard input works; it does not use systemd TTY allocation. With `-nographic -serial stdio`, the serial console is a separate path and may not receive the prompt unless the live kernel `console=` argument includes that serial port.
-
-----------
-
 ## Testing a Build
 
 You can validate your Butane configuration without running a full build:

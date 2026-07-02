@@ -72,11 +72,7 @@ This guide is written for everyone. Even if you aren't highly technical, followi
 1. **Download the Installer:** Download the latest edge node installer image (`.iso` file) from our [GitHub Releases](../../releases). *(Make sure to download the `.iso` file, not the source code folder).*
 2. **Flash to a USB Drive:** You need a USB stick with at least 8GB of space. Use a free tool like [balenaEtcher](https://etcher.balena.io/) or [Rufus](https://rufus.ie/). Open the tool, select the downloaded `.iso` image, select your USB drive, and click **Flash**. Wait for it to complete.
 3. **Boot the Device:** Insert the flashed USB stick into your hardware (e.g., your HoloPort or PC). Connect a monitor, a keyboard, and an ethernet cable connected to your internet router. Turn the device on and press **F11** (or your system's boot menu key) repeatedly to boot from the USB drive.
-4. **Confirm the Install Target:** The screen will show which hard drive Holo Node OS will be installed on (device name, model, and size), along with a warning that **all data on that drive will be permanently erased**.
-
-   - Review the disk details carefully to make sure it is the correct drive (not your USB installer stick).
-   - Type **WIPE** and press **Enter** to begin installation.
-   - To cancel, press **Ctrl+C** or type anything other than `WIPE`. The system will stop without modifying your disk, and you can troubleshoot from the live shell.
+4. **Automatic Installation:** The system will automatically install the operating system. No manual interaction is required here.
 
    > **Important:** When the installation finishes, a password will be displayed on the screen. **Write this password down.** You will need it later. Remove the USB stick and let the system reboot.
 
