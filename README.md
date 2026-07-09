@@ -69,22 +69,22 @@ This guide is written for everyone. Even if you aren't highly technical, followi
 
 ### Part 1: Flashing and Booting
 
+> **Warning — this ISO will automatically wipe the target device.** Booting from this installer immediately begins a full, unattended installation that **erases all existing data** on the computer's internal drive. To avoid unintentionally wiping a machine, use this ISO **only** on hardware you are prepared to wipe and fully dedicate to participating as a node in the Holo network. Do not boot it on a general-purpose PC, laptop, or server that you still need for other work.
+
 1. **Download the Installer:** Download the latest edge node installer image (`.iso` file) from our [GitHub Releases](../../releases). *(Make sure to download the `.iso` file, not the source code folder).*
 2. **Flash to a USB Drive:** You need a USB stick with at least 8GB of space. Use a free tool like [balenaEtcher](https://etcher.balena.io/) or [Rufus](https://rufus.ie/). Open the tool, select the downloaded `.iso` image, select your USB drive, and click **Flash**. Wait for it to complete.
 3. **Boot the Device:** Insert the flashed USB stick into your hardware (e.g., your HoloPort or PC). Connect a monitor, a keyboard, and an ethernet cable connected to your internet router. Turn the device on and press **F11** (or your system's boot menu key) repeatedly to boot from the USB drive.
-4. **Automatic Installation:** The system will automatically install the operating system. No manual interaction is required here.
-
-   > **Important:** When the installation finishes, a password will be displayed on the screen. **Write this password down.** You will need it later. Remove the USB stick and let the system reboot.
+4. **Automatic Installation:** The system will automatically install the operating system. No manual interaction is required here. Remove the USB stick and let the system reboot.
 
 5. **Open the Setup Interface:** On a separate laptop or PC connected to the same WiFi/network, open a web browser and go to:
 
-   `http://holo.local:8080`
+   `http://holo.local`
 
    The node advertises itself on your local network via mDNS, so you do not need to look up its IP address. The node will automatically redirect you to the onboarding setup page.
 
-   > **Fallback:** If `holo.local` does not resolve (some corporate networks block mDNS), the monitor will display the node's IP address assigned by your router (usually `192.168.x.x`). Use `http://<node-ip>:8080` instead.
+   > **Fallback:** If `holo.local` does not resolve (some corporate networks block mDNS), the monitor will display the node's IP address assigned by your router (usually `192.168.x.x`). Use `http://<node-ip>` instead.
 
-   > **Note:** After onboarding, if you chose a custom node name during setup, the local address may change to `http://<node-name>.local:8080`.
+   > **Note:** After onboarding, if you chose a custom node name during setup, the local address may change to `http://<node-name>.local`.
 
 ### Part 2: Generating an SSH Key
 
@@ -132,7 +132,7 @@ Now that you have your SSH key, return to the setup page in your web browser.
 
 ## 💻 Managing Your Node
 
-Once onboarding is complete, you can monitor and adjust your node's settings at any time. Simply open your web browser and navigate to `http://holo.local:8080` (or `http://<node-name>.local:8080` if you set a custom name during onboarding). If mDNS is unavailable on your network, use the node's IP address instead (e.g., `http://192.168.1.50:8080`).
+Once onboarding is complete, you can monitor and adjust your node's settings at any time. Simply open your web browser and navigate to `http://holo.local` (or `http://<node-name>.local` if you set a custom name during onboarding). If mDNS is unavailable on your network, use the node's IP address instead (e.g., `http://192.168.1.50`).
 
 The system will recognize that you have already onboarded and will automatically redirect you to your management dashboard. From this dashboard, you can:
 
@@ -241,7 +241,7 @@ sudo systemctl restart wind-tunnel.service   # or edgenode.service
 
 ### "I need to switch modes after setup"
 
-From the management dashboard (`http://<node-ip>:8080`), use the Hardware Mode selector to switch between EdgeNode and Wind Tunnel. Alternatively, over SSH:
+From the management dashboard (`http://<node-ip>`), use the Hardware Mode selector to switch between EdgeNode and Wind Tunnel. Alternatively, over SSH:
 
 ```bash
 # Switch to Wind Tunnel

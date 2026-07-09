@@ -166,9 +166,9 @@ storage:
             This may take up to 30 seconds.</p>
             <div class="note">Your device will disconnect from HoloNode-Setup.
             Once the node is online, open
-            <strong>http://holo.local:8080</strong> to complete setup.
+            <strong>http://holo.local</strong> to complete setup.
             If that does not work, find its IP on your router and use
-            <strong>http://&lt;node-ip&gt;:8080</strong> instead.
+            <strong>http://&lt;node-ip&gt;</strong> instead.
             </div>
           </div></body></html>
 
@@ -184,7 +184,7 @@ storage:
           MANAGER_BIN="/usr/local/bin/node-manager"
           AP_SSID="HoloNode-Setup"
           AP_PASSWORD="holonode"
-          LISTEN_PORT="8080"
+          LISTEN_PORT="80"
           LOG="[node-setup]"
           ISSUE_FILE="/run/issue.d/50-node-setup.issue"
           FORM_HTML="/usr/local/share/holo-node/wifi-form.html"
@@ -288,8 +288,8 @@ storage:
               printf '\033[1;32m║        HOLO NODE SETUP COMPLETE              ║\033[0m\n'
               printf '\033[1;32m╚══════════════════════════════════════════════╝\033[0m\n'
               printf '\033[1;37mnode-manager is installed and starting.\033[0m\n'
-              printf '\033[1;37mOpen \033[0;36mhttp://holo.local:8080\033[1;37m to complete setup.\033[0m\n'
-              printf '\033[1;37m(Or use \033[0;36mhttp://<node-ip>:8080\033[1;37m if holo.local does not resolve.)\033[0m\n\n'
+              printf '\033[1;37mOpen \033[0;36mhttp://holo.local\033[1;37m to complete setup.\033[0m\n'
+              printf '\033[1;37m(Or use \033[0;36mhttp://<node-ip>\033[1;37m if holo.local does not resolve.)\033[0m\n\n'
             } > "$ISSUE_FILE"
           }
 
